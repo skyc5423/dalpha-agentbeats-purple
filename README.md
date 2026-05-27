@@ -1,90 +1,60 @@
-# A2A Agent Template
+# dalpha-agentbeats-purple
 
-A minimal template for building [A2A (Agent-to-Agent)](https://a2a-protocol.org/latest/) agents.
+A public AgentBeats **purple agent** prototype for experimenting with A2A-compatible benchmark submissions.
 
-## Project Structure
+This repository was created from [`RDI-Foundation/agent-template`](https://github.com/RDI-Foundation/agent-template). The current implementation is intentionally minimal: it exposes a valid A2A server and returns a deterministic smoke-test echo. Benchmark-specific reasoning loops will be added behind the same A2A interface.
 
-```
+## Goals
+
+1. Keep the competition submission code public and reproducible.
+2. Avoid depending on private Dalpha Harness/runtime code or internal credentials.
+3. Reuse Dalpha Harness design ideas where safe: config-driven agents, tools, prompts/skills, verifier loops, and benchmark-specific profiles.
+4. Start with AgentBeats packaging/conformance, then iterate on benchmark performance.
+
+## Project structure
+
+```text
 src/
-├─ server.py      # Server setup and agent card configuration
+├─ server.py      # A2A server and agent card
 ├─ executor.py    # A2A request handling
-├─ agent.py       # Your agent implementation goes here
+├─ agent.py       # Agent implementation entry point
 └─ messenger.py   # A2A messaging utilities
 tests/
-└─ test_agent.py  # Agent tests
-Dockerfile            # Docker configuration
-pyproject.toml        # Python dependencies
-amber-manifest.json5  # Amber manifest
-.github/
-└─ workflows/
-   └─ test-and-publish.yml # CI workflow
+└─ test_agent.py  # A2A conformance smoke tests
+Dockerfile
+pyproject.toml
+amber-manifest.json5
 ```
 
-## Getting Started
-
-1. **Create your repository** - Click "Use this template" to create your own repository from this template
-
-2. **Implement your agent** - Add your agent logic to [`src/agent.py`](src/agent.py)
-
-3. **Configure your agent card** - Fill in your agent's metadata (name, skills, description) in [`src/server.py`](src/server.py)
-
-4. **Fill out your [Amber](https://github.com/RDI-Foundation/amber) manifest** - Update [`amber-manifest.json5`](amber-manifest.json5) to use your agent in Amber scenarios
-
-5. **Write your tests** - Add custom tests for your agent in [`tests/test_agent.py`](tests/test_agent.py)
-
-For a concrete example of implementing an agent using this template, see this [draft PR](https://github.com/RDI-Foundation/agent-template/pull/8).
-
-## Running Locally
+## Local development
 
 ```bash
-# Install dependencies
-uv sync
-
-# Run the server
-uv run src/server.py
-```
-
-## Running with Docker
-
-```bash
-# Build the image
-docker build -t my-agent .
-
-# Run the container
-docker run -p 9009:9009 my-agent
-```
-
-## Testing
-
-Run A2A conformance tests against your agent.
-
-```bash
-# Install test dependencies
 uv sync --extra test
+uv run src/server.py --host 0.0.0.0 --port 9009
+```
 
-# Start your agent (uv or docker; see above)
+In another shell:
 
-# Run tests against your running agent URL
+```bash
 uv run pytest --agent-url http://localhost:9009
 ```
 
-## Publishing
+## Docker
 
-The repository includes a GitHub Actions workflow that automatically builds, tests, and publishes a Docker image of your agent to GitHub Container Registry.
-
-If your agent needs API keys or other secrets, add them in Settings → Secrets and variables → Actions → Repository secrets. They'll be available as environment variables during CI tests.
-
-- **Push to `main`** → publishes `latest` tag:
-```
-ghcr.io/<your-username>/<your-repo-name>:latest
+```bash
+docker build -t dalpha-agentbeats-purple .
+docker run --rm -p 9009:9009 dalpha-agentbeats-purple
 ```
 
-- **Create a git tag** (e.g. `git tag v1.0.0 && git push origin v1.0.0`) → publishes version tags:
-```
-ghcr.io/<your-username>/<your-repo-name>:1.0.0
-ghcr.io/<your-username>/<your-repo-name>:1
-```
+## Roadmap
 
-Once the workflow completes, find your Docker image in the Packages section (right sidebar of your repository). Configure the package visibility in package settings.
+- [ ] Verify A2A conformance and Docker build locally.
+- [ ] Register the smoke-test purple agent on AgentBeats.
+- [ ] Add a benchmark profile system.
+- [ ] Add Terminal Bench 2.0 shell-loop prototype.
+- [ ] Add SWE-bench style repository-edit loop.
+- [ ] Add web/research profile for Mind2Web2 or OfficeQA.
 
-> **Note:** Organization repositories may need package write permissions enabled manually (Settings → Actions → General). Version tags must follow [semantic versioning](https://semver.org/) (e.g., `v1.0.0`).
+## Safety / openness
+
+Do not commit private Dalpha Harness code, internal prompts, `.env` files, credentials, customer data, or internal endpoints. All secrets must be supplied via environment variables or AgentBeats/GitHub Actions secrets.

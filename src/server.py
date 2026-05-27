@@ -24,16 +24,23 @@ def main():
     # See: https://a2a-protocol.org/latest/tutorials/python/3-agent-skills-and-card/
     
     skill = AgentSkill(
-        id="",
-        name="",
-        description="",
-        tags=[],
-        examples=[]
+        id="general-purpose-agent",
+        name="General-purpose task solver",
+        description=(
+            "Prototype A2A purple agent for AgentBeats. The initial implementation "
+            "is a safe echo/smoke-test agent; benchmark-specific reasoning loops "
+            "will be added behind this A2A interface."
+        ),
+        tags=["agentbeats", "purple-agent", "dalpha", "prototype"],
+        examples=["Solve this task and return the final answer."],
     )
 
     agent_card = AgentCard(
-        name="",
-        description="",
+        name="dalpha-agentbeats-purple",
+        description=(
+            "Dalpha AgentBeats purple agent prototype for experimenting with "
+            "public, A2A-compatible benchmark agents."
+        ),
         url=args.card_url or f"http://{args.host}:{args.port}/",
         version='1.0.0',
         default_input_modes=['text'],

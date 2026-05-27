@@ -21,12 +21,15 @@ class Agent:
         """
         input_text = get_message_text(message)
 
-        # Replace this example code with your agent logic
+        # Initial smoke-test behavior. Keep this deterministic while we verify
+        # AgentBeats/A2A packaging, Docker publishing, and leaderboard submission.
+        # Benchmark-specific agent loops should replace this behind the same
+        # A2A interface once the repo is registered and running end-to-end.
 
         await updater.update_status(
             TaskState.working, new_agent_text_message("Thinking...")
         )
         await updater.add_artifact(
-            parts=[Part(root=TextPart(text=input_text))],
-            name="Echo",
+            parts=[Part(root=TextPart(text=f"[dalpha-agentbeats-purple] {input_text}"))],
+            name="Smoke Test Echo",
         )
