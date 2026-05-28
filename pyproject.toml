@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "a2a-sdk[http-server]>=0.3.20",
+    "pypdf>=6.4.0",
     "uvicorn>=0.38.0",
 ]
 
@@ -15,3 +16,6 @@ test = [
     "pytest-asyncio>=0.24.0",
     "httpx>=0.28.1",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

@@ -1,5 +1,22 @@
+import os
+
 import httpx
 import pytest
+
+
+# Strip LLM env vars at collection time so unit tests under
+# ``Orchestrator()`` do not accidentally pick up a real API key from the dev
+# shell. Tests that need an LLM inject one explicitly via ``llm=``.
+for _var in (
+    "OPENAI_API_KEY",
+    "LLM_API_KEY",
+    "OPENAI_BASE_URL",
+    "LLM_BASE_URL",
+    "OPENAI_MODEL",
+    "LLM_MODEL",
+):
+    os.environ.pop(_var, None)
+os.environ["OPENAI_WEB_SEARCH_DISABLED"] = "1"
 
 
 def pytest_addoption(parser):

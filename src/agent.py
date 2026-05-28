@@ -1,35 +1,37 @@
+"""Thin A2A adapter that delegates to the purple orchestrator."""
+
+from __future__ import annotations
+
 from a2a.server.tasks import TaskUpdater
-from a2a.types import Message, TaskState, Part, TextPart
-from a2a.utils import get_message_text, new_agent_text_message
+from a2a.types import Message, TaskState
+from a2a.utils import new_agent_text_message
 
 from messenger import Messenger
+from purple import Orchestrator, a2a_message_to_request, result_to_artifact_parts
 
 
 class Agent:
-    def __init__(self):
+    def __init__(self, orchestrator: Orchestrator | None = None) -> None:
         self.messenger = Messenger()
-        # Initialize other state here
+        self._orchestrator = orchestrator or Orchestrator()
 
     async def run(self, message: Message, updater: TaskUpdater) -> None:
-        """Implement your agent logic here.
+        """Run the orchestrator against an incoming A2A message.
 
         Args:
-            message: The incoming message
-            updater: Report progress (update_status) and results (add_artifact)
+            message: The incoming A2A message.
+            updater: Reports progress (``update_status``) and results
+                (``add_artifact``).
 
-        Use self.messenger.talk_to_agent(message, url) to call other agents.
+        Outbound calls to peer agents are available via ``self.messenger`` but
+        are not used by the default in-context pipeline.
         """
-        input_text = get_message_text(message)
-
-        # Initial smoke-test behavior. Keep this deterministic while we verify
-        # AgentBeats/A2A packaging, Docker publishing, and leaderboard submission.
-        # Benchmark-specific agent loops should replace this behind the same
-        # A2A interface once the repo is registered and running end-to-end.
-
+        request = a2a_message_to_request(message)
         await updater.update_status(
-            TaskState.working, new_agent_text_message("Thinking...")
+            TaskState.working, new_agent_text_message("Profiling task...")
         )
+        result = await self._orchestrator.solve(request)
         await updater.add_artifact(
-            parts=[Part(root=TextPart(text=f"[dalpha-agentbeats-purple] {input_text}"))],
-            name="Smoke Test Echo",
+            parts=result_to_artifact_parts(result),
+            name="Purple Agent Answer",
         )

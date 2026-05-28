@@ -20,26 +20,40 @@ def main():
     parser.add_argument("--card-url", type=str, help="URL to advertise in the agent card")
     args = parser.parse_args()
 
-    # Fill in your agent card
     # See: https://a2a-protocol.org/latest/tutorials/python/3-agent-skills-and-card/
-    
     skill = AgentSkill(
-        id="general-purpose-agent",
-        name="General-purpose task solver",
+        id="purple-orchestrator",
+        name="Capability-based purple agent",
         description=(
-            "Prototype A2A purple agent for AgentBeats. The initial implementation "
-            "is a safe echo/smoke-test agent; benchmark-specific reasoning loops "
-            "will be added behind this A2A interface."
+            "General-purpose A2A purple agent. A single orchestrator dispatches "
+            "the task to capability specialists (planner, shell/code, "
+            "document/research, policy, fact verifier, answer composer) based on "
+            "a deterministic capability profile of the incoming task. The agent "
+            "does no dataset-specific routing and stores no task-to-answer "
+            "mappings."
         ),
-        tags=["agentbeats", "purple-agent", "dalpha", "prototype"],
-        examples=["Solve this task and return the final answer."],
+        tags=[
+            "agentbeats",
+            "purple-agent",
+            "a2a",
+            "general-purpose",
+            "capability-based",
+            "orchestrator",
+        ],
+        examples=[
+            "Read the attached document and answer the user's question.",
+            "Summarize the provided context in two sentences.",
+            "Given a short code snippet, explain what it does.",
+        ],
     )
 
     agent_card = AgentCard(
         name="dalpha-agentbeats-purple",
         description=(
-            "Dalpha AgentBeats purple agent prototype for experimenting with "
-            "public, A2A-compatible benchmark agents."
+            "Capability-based A2A purple agent. A single orchestrator dispatches "
+            "the task to capability specialists based on a deterministic, "
+            "content-feature capability profile; routing never depends on "
+            "dataset names or peer-agent identifiers."
         ),
         url=args.card_url or f"http://{args.host}:{args.port}/",
         version='1.0.0',
