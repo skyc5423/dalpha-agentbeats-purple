@@ -1307,6 +1307,68 @@ async def test_finalizer_synthesizes_candidate_from_all_evidence_not_search_titl
     assert "Abraham Robinson - The Mathematics Genealogy Project" != seen_payloads[0]["answer_candidate"]
 
 
+@pytest.mark.asyncio
+async def test_composer_gets_rejected_candidate_separately_and_still_answers() -> None:
+    composer_payloads: list[dict] = []
+
+    def responder(messages, tag):
+        if tag == "candidate_synthesizer":
+            return json.dumps(
+                {
+                    "answer_candidate": (
+                        "Worlds 2023 Grand Finals; T1 vs Weibo; Faker Sylas; "
+                        "100% Sylas win rate."
+                    )
+                }
+            )
+        if tag == "fact_verifier":
+            return json.dumps(
+                {
+                    "confidence": 0.05,
+                    "verdict": "unsupported",
+                    "concerns": [
+                        "Candidate says 2023 T1 vs Weibo, but strongest evidence says 2024 BLG vs T1.",
+                        "Candidate says 100%, but evidence says 66.7% over 3 games.",
+                    ],
+                }
+            )
+        if tag == "composer":
+            payload = extract_json(messages[-1].content) or {}
+            composer_payloads.append(payload)
+            return "2024 Worlds Final BLG vs T1; Faker/T1; Sylas win rate 66.7% (2/3)."
+        return ""
+
+    transcript = Transcript()
+    transcript.append(
+        ToolCall(id="research", name="research_answer", args={}),
+        ToolResult(
+            tool_call_id="research",
+            ok=True,
+            summary="research",
+            outputs={
+                "answer_candidate": "2024 Worlds Final BLG vs T1; Faker; 66.7%",
+                "spans": [
+                    "The Worlds finals series is 2024 Worlds Final: Bilibili Gaming (BLG) vs T1.",
+                    "Faker's Sylas win rate was 66.7%: 2 wins in 3 games.",
+                ],
+            },
+        ),
+    )
+
+    result = await Finalizer(llm=FakeLLM(responder=responder)).run(
+        TaskRequest(prompt="Identify the Worlds finals Sylas/Rakan play and win rate."),
+        transcript,
+    )
+
+    assert result.confidence == 0.05
+    assert "2024 Worlds Final" in result.answer
+    assert composer_payloads
+    payload = composer_payloads[0]
+    assert payload["answer_candidate"] == ""
+    assert "2023 Grand Finals" in payload["rejected_candidate"]
+    assert "2024 Worlds Final" in "\n".join(payload["evidence_spans"])
+
+
 # ---------------------------------------------------------------------------
 # Fact-verifier behavior via Orchestrator
 # ---------------------------------------------------------------------------

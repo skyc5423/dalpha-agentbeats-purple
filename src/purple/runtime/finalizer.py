@@ -405,14 +405,25 @@ class Finalizer:
             )
             if chunk
         )
+        verdict = verification["verdict"]
+        # Low confidence should not suppress an answer in benchmark settings, but
+        # an explicitly unsupported candidate must not be treated as the answer
+        # seed. Keep it visible for debugging while forcing the composer to build
+        # from evidence + verifier concerns instead of repeating rejected claims.
         user_payload = {
             "user_prompt": request.prompt,
             "requirements": requirements,
-            "answer_candidate": candidate,
+            "answer_candidate": candidate if verdict != "unsupported" else "",
+            "rejected_candidate": candidate if verdict == "unsupported" else "",
             "confidence": verification["confidence"],
-            "verdict": verification["verdict"],
+            "verdict": verdict,
             "concerns": list(verification["concerns"]),
             "evidence_spans": list(spans),
+            "composition_policy": (
+                "Always produce the best benchmark answer from supported evidence. "
+                "If rejected_candidate is present, do not use it as a source of truth; "
+                "use verifier concerns to identify contradictions, then answer from evidence_spans."
+            ),
         }
         user_text = (
             "Inputs (JSON):\n"
