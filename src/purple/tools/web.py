@@ -86,6 +86,64 @@ def extract_urls(text: str, *, limit: int = 5) -> list[str]:
     return seen
 
 
+def _format_math_genealogy_page_text(raw: str, url: str) -> str:
+    """Return structured text for Mathematics Genealogy profile pages.
+
+    The plain HTML-stripped page keeps advisor names but loses the relative
+    advisor links, so the controller cannot follow an advisor chain. This
+    formatter keeps the page domain-agnostic enough for academic genealogy
+    tasks: profile name, Ph.D. line, dissertation, and advisor edges with
+    absolute source URLs.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.netloc.lower() not in {"www.mathgenealogy.org", "mathgenealogy.org"}:
+        return ""
+    if not parsed.path.endswith("/id.php"):
+        return ""
+
+    title_match = re.search(r"<title>\s*(.*?)\s*-\s*The Mathematics Genealogy Project\s*</title>", raw, re.I | re.S)
+    h2_match = re.search(r"<h2[^>]*>\s*(.*?)\s*</h2>", raw, re.I | re.S)
+    name = ""
+    name_match = h2_match or title_match
+    if name_match is not None:
+        name = html_to_text(name_match.group(1), limit_chars=200)
+    name = " ".join(name.split())
+
+    plain = html_to_text(raw, limit_chars=12000)
+    phd = ""
+    phd_match = re.search(r"Ph\.D\.\s+(.*?)\s+Dissertation:", plain, re.I | re.S)
+    if phd_match:
+        phd = " ".join(phd_match.group(1).split())
+
+    dissertation = ""
+    diss_match = re.search(r"Dissertation:\s*(.*?)\s+(?:Mathematics Subject Classification:|Advisor(?:\s+\d+)?:|Students:)", plain, re.I | re.S)
+    if diss_match:
+        dissertation = " ".join(diss_match.group(1).split())
+
+    advisor_lines: list[str] = []
+    for num, href, advisor_name in re.findall(
+        r"Advisor\s*(\d*)\s*:\s*<a\s+href=\"([^\"]+)\"[^>]*>(.*?)</a>",
+        raw,
+        re.I | re.S,
+    ):
+        advisor_url = urllib.parse.urljoin(url, html.unescape(href))
+        advisor = " ".join(html_to_text(advisor_name, limit_chars=200).split())
+        label = f"Advisor {num or '1'}"
+        advisor_lines.append(f"{label}: {advisor} ({advisor_url})")
+
+    if not (name or advisor_lines):
+        return ""
+    lines = [f"MathGenealogy profile: {name}" if name else "MathGenealogy profile"]
+    if phd:
+        lines.append(f"Ph.D.: {phd}")
+    if dissertation:
+        lines.append(f"Dissertation: {dissertation}")
+    lines.extend(advisor_lines)
+    lines.append("Source: Mathematics Genealogy Project profile page " + url)
+    lines.append("Plain page text excerpt: " + plain[:3000])
+    return "\n".join(lines)
+
+
 class StdlibWebClient:
     def __init__(self, *, timeout_s: float = 12.0, user_agent: str = "Mozilla/5.0 AgentBeatsPurple/0.1") -> None:
         self._timeout_s = timeout_s
@@ -216,11 +274,94 @@ class StdlibWebClient:
         github_text = self._fetch_github_commit_api_text(url, limit_chars)
         if github_text:
             return github_text
+        github_list_text = self._fetch_github_commits_list_api_text(url, limit_chars)
+        if github_list_text:
+            return github_list_text
+        github_pull_text = self._fetch_github_pull_api_text(url, limit_chars)
+        if github_pull_text:
+            return github_pull_text
         try:
             raw = self._open(url)
         except Exception:
             return ""
+        math_genealogy_text = _format_math_genealogy_page_text(raw, url)
+        if math_genealogy_text:
+            return math_genealogy_text[:limit_chars]
         return html_to_text(raw, limit_chars=limit_chars)
+
+    def _fetch_github_commits_list_api_text(self, url: str, limit_chars: int) -> str:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.netloc.lower() != "api.github.com":
+            return ""
+        match = re.match(r"/repos/([^/]+/[^/]+)/commits/?$", parsed.path)
+        if not match:
+            return ""
+        repo = match.group(1)
+        req = urllib.request.Request(url, headers={"User-Agent": self._user_agent})
+        try:
+            with urllib.request.urlopen(req, timeout=self._timeout_s) as resp:
+                data = json.loads(resp.read().decode("utf-8", errors="replace"))
+        except Exception:
+            return ""
+        if not isinstance(data, list) or not data:
+            return ""
+        query = urllib.parse.parse_qs(parsed.query)
+        path_filter = (query.get("path") or [""])[0]
+        sha_filter = (query.get("sha") or [""])[0]
+        page = (query.get("page") or [""])[0]
+        per_page = (query.get("per_page") or [""])[0]
+        lines = [
+            f"GitHub commits API URL: {url}",
+            f"Repository: {repo}",
+            f"Branch/ref: {sha_filter or '(default)'}",
+            f"Path filter: {path_filter or '(none)'}",
+            f"Page/per_page: {page or '1'}/{per_page or str(len(data))}",
+            f"Commits returned on this page: {len(data)}",
+            "GitHub returns this endpoint newest-to-oldest unless pagination/order is changed.",
+        ]
+        oldest = data[-1]
+        lines.extend(["Oldest commit on this returned page:", *_format_github_commit_summary(oldest)])
+        lines.append("Commits on this page, newest to oldest:")
+        for item in data[: min(len(data), 40)]:
+            lines.extend(_format_github_commit_summary(item))
+        return "\n".join(line for line in lines if line)[:limit_chars]
+
+    def _fetch_github_pull_api_text(self, url: str, limit_chars: int) -> str:
+        match = re.search(r"github\.com/([^/]+/[^/]+)/pull/(\d+)(?:/commits)?/?$", url)
+        if not match:
+            return ""
+        repo, number = match.groups()
+        api_url = f"https://api.github.com/repos/{repo}/pulls/{number}"
+        req = urllib.request.Request(api_url, headers={"User-Agent": self._user_agent})
+        try:
+            with urllib.request.urlopen(req, timeout=self._timeout_s) as resp:
+                data = json.loads(resp.read().decode("utf-8", errors="replace"))
+        except Exception:
+            return ""
+        if not isinstance(data, dict):
+            return ""
+        merge_sha = str(data.get("merge_commit_sha") or "")
+        user = data.get("user") or {}
+        lines = [
+            f"GitHub pull request URL: {data.get('html_url', url)}",
+            f"Repository: {repo}",
+            f"PR number: {data.get('number', number)}",
+            f"Title: {data.get('title', '')}",
+            f"State: {data.get('state', '')}",
+            f"Merged at: {data.get('merged_at', '')}",
+            f"Merge commit SHA: {merge_sha}",
+        ]
+        if isinstance(user, dict) and user.get("login"):
+            lines.append(f"PR author: @{user.get('login')} {user.get('html_url', '')}")
+        if merge_sha:
+            commit_text = self._fetch_github_commit_api_text(
+                f"https://github.com/{repo}/commit/{merge_sha}",
+                limit_chars,
+            )
+            if commit_text:
+                lines.append("Merge commit metadata:")
+                lines.append(commit_text)
+        return "\n".join(line for line in lines if line)[:limit_chars]
 
     def _fetch_github_commit_api_text(self, url: str, limit_chars: int) -> str:
         match = re.search(r"github\.com/([^/]+/[^/]+)/commit/([0-9a-fA-F]{7,40})", url)
@@ -326,6 +467,38 @@ class StdlibWebClient:
                     f"GitHub profile: not provided in commit trailer; email: {clean_email}"
                 )
         return out
+
+
+def _format_github_commit_summary(item: object) -> list[str]:
+    if not isinstance(item, dict):
+        return []
+    commit = item.get("commit", {}) or {}
+    if not isinstance(commit, dict):
+        commit = {}
+    author = commit.get("author", {}) or {}
+    committer = commit.get("committer", {}) or {}
+    if not isinstance(author, dict):
+        author = {}
+    if not isinstance(committer, dict):
+        committer = {}
+    gh_author = item.get("author") or {}
+    gh_committer = item.get("committer") or {}
+    sha = str(item.get("sha") or "")
+    html_url = str(item.get("html_url") or "")
+    message = str(commit.get("message") or "").split("\n", 1)[0]
+    lines = [
+        f"- commit {sha[:12]} ({sha})",
+        f"  url: {html_url}",
+        f"  date: {author.get('date', '')}",
+        f"  author: {author.get('name', '')} <{author.get('email', '')}>",
+        f"  committer: {committer.get('name', '')} <{committer.get('email', '')}> at {committer.get('date', '')}",
+        f"  message: {message}",
+    ]
+    if isinstance(gh_author, dict) and gh_author.get("login"):
+        lines.append(f"  GitHub author: @{gh_author.get('login')} {gh_author.get('html_url', '')}")
+    if isinstance(gh_committer, dict) and gh_committer.get("login"):
+        lines.append(f"  GitHub committer: @{gh_committer.get('login')} {gh_committer.get('html_url', '')}")
+    return lines
 
 
 def dumps_sources(results: list[dict[str, str]]) -> str:

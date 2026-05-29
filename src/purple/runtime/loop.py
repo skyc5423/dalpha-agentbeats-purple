@@ -92,9 +92,13 @@ class ControllerLoop:
                 action = await self._controller.next_action(request, transcript, tool_map)
 
             if isinstance(action, FinalAnswer):
-                if _latest_sufficiency_insufficient(transcript) and self._budget.can_continue():
+                if _final_needs_more_evidence_check(transcript) and self._budget.can_continue():
                     action = await fallback_controller.next_action(request, transcript, tool_map)
                     if isinstance(action, FinalAnswer):
+                        if _final_needs_more_evidence_check(transcript):
+                            surrendered = True
+                            surrender_reason = "evidence insufficient after fallback"
+                            break
                         final_answer = action.answer or ""
                         break
                     if isinstance(action, Surrender):
@@ -105,9 +109,13 @@ class ControllerLoop:
                     final_answer = action.answer or ""
                     break
             if isinstance(action, Surrender):
-                if _latest_sufficiency_insufficient(transcript) and self._budget.can_continue():
+                if _final_needs_more_evidence_check(transcript) and self._budget.can_continue():
                     action = await fallback_controller.next_action(request, transcript, tool_map)
                     if isinstance(action, FinalAnswer):
+                        if _final_needs_more_evidence_check(transcript):
+                            surrendered = True
+                            surrender_reason = "evidence insufficient after fallback"
+                            break
                         final_answer = action.answer or ""
                         break
                     if not isinstance(action, Surrender):
@@ -191,6 +199,54 @@ class ControllerLoop:
             truncated=truncated,
             flags=tuple(flags),
         )
+
+
+def _final_needs_more_evidence_check(transcript: Transcript) -> bool:
+    """Block controller final/stop when evidence has not been checked.
+
+    LLM controllers can jump directly from a tool-produced candidate to
+    ``FinalAnswer``. For research-style tasks this skips the requirement coverage
+    critic, so force the deterministic fallback controller to run
+    ``sufficiency_check`` or follow-up search first whenever new evidence exists
+    after the latest sufficiency verdict, or the latest verdict is explicitly
+    insufficient.
+    """
+
+    last_evidence_idx = -1
+    last_suff_idx = -1
+    latest_sufficient: bool | None = None
+    for i, (call, result) in enumerate(transcript.turns):
+        if not result.ok:
+            continue
+        if call.name == "sufficiency_check":
+            last_suff_idx = i
+            value = result.outputs.get("sufficient")
+            if value is True:
+                latest_sufficient = True
+            elif value is False:
+                latest_sufficient = False
+        elif _looks_like_evidence_outputs(result.outputs):
+            last_evidence_idx = i
+    if latest_sufficient is False:
+        return True
+    return last_evidence_idx >= 0 and last_evidence_idx > last_suff_idx
+
+
+def _looks_like_evidence_outputs(outputs: Any) -> bool:
+    if not isinstance(outputs, dict):
+        return False
+    if outputs.get("answer_candidate"):
+        return True
+    spans = outputs.get("spans")
+    if isinstance(spans, (list, tuple)) and any(spans):
+        return True
+    fetched = outputs.get("fetched_pages")
+    if isinstance(fetched, (list, tuple)) and any(fetched):
+        return True
+    results = outputs.get("results")
+    if isinstance(results, (list, tuple)) and any(results):
+        return True
+    return False
 
 
 def _latest_sufficiency_insufficient(transcript: Transcript) -> bool:

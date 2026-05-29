@@ -233,6 +233,29 @@ class SufficiencyCheckTool:
             sufficient = True
             missing_points = []
             source = f"{source}+github_commit_heuristic"
+        elif "commit" in (ctx.request.prompt or "").lower() and any(
+            token in (ctx.request.prompt or "").lower()
+            for token in ("github", "repository", "branch")
+        ):
+            sufficient = False
+            marker = "structured GitHub commit metadata"
+            if marker not in missing_points:
+                missing_points = [marker, *missing_points[:7]]
+            source = f"{source}+github_commit_guard"
+
+        prompt_lower = (ctx.request.prompt or "").lower()
+        candidate_lower = (candidate or "").lower()
+        if (
+            "advisor" in prompt_lower
+            and "lineage" in prompt_lower
+            and ("five" in prompt_lower or "5" in prompt_lower or "generation" in prompt_lower)
+            and any(marker in candidate_lower for marker in ("cannot be completed", "cannot complete", "insufficient", "not enough"))
+        ):
+            sufficient = False
+            marker = "complete five-generation advisor lineage"
+            if marker not in missing_points:
+                missing_points = [marker, *missing_points[:7]]
+            source = f"{source}+advisor_lineage_guard"
 
         verdict = "sufficient" if sufficient else "insufficient"
         return ToolResult(

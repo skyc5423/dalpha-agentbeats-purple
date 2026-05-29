@@ -99,15 +99,6 @@ class WebSearchTool:
             if snippet:
                 spans.append(f"Search result: {snippet} ({item.get('url', '')})")
 
-        candidate = ""
-        if results:
-            candidate = (
-                results[0].get("snippet")
-                or results[0].get("title")
-                or results[0].get("url")
-                or ""
-            )
-
         return ToolResult(
             tool_call_id="",
             ok=True,
@@ -117,7 +108,6 @@ class WebSearchTool:
                 "query": query,
                 "results": results[:limit],
                 "spans": spans,
-                "answer_candidate": candidate,
                 "source": "web",
             },
         )

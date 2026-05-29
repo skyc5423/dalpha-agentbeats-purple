@@ -19,6 +19,7 @@ verified as sufficient before commitment:
 from __future__ import annotations
 
 import itertools
+import re
 from typing import Iterable, Mapping
 
 from ..profiler import CapabilityProfiler
@@ -188,6 +189,10 @@ class RuleBasedController:
             next_query = _latest_next_query(transcript, prior_queries)
             if not next_query:
                 next_query = _missing_requirement_query(request, transcript, prior_queries)
+            if not next_query:
+                prompt_lower = (request.prompt or "").lower()
+                if "advisor" in prompt_lower and any(token in prompt_lower for token in ("lineage", "genealogy", "doctoral", "phd")):
+                    next_query = self._refined_query(request, transcript, "")
             return {"query": next_query, "limit": 8, "skip_web_answerer": True} if next_query else None
 
         next_query = _latest_next_query(transcript, prior_queries)
@@ -239,7 +244,11 @@ class RuleBasedController:
         if repo:
             pieces = [" ".join(boosters)]
         else:
-            pieces = [prompt[:220], " ".join(missing_terms), " ".join(boosters)]
+            advisor_name = _advisor_name_from_transcript(transcript)
+            if advisor_name and any(token in lowered for token in ("advisor", "lineage", "genealogy", "doctoral", "phd")):
+                pieces = [f'"{advisor_name}" "Mathematics Genealogy" advisor Ph.D.']
+            else:
+                pieces = [prompt[:220], " ".join(missing_terms), " ".join(boosters)]
         query = " ".join(piece for piece in pieces if piece).strip()
         return query[:300]
 
@@ -332,6 +341,27 @@ def _missing_requirement_query(request: TaskRequest, transcript: Transcript, pri
     prompt = " ".join((request.prompt or "").split())[:180]
     query = " ".join([prompt, *parts])[:300].strip()
     return "" if query in prior_queries else query
+
+
+def _advisor_name_from_transcript(transcript: Transcript) -> str:
+    patterns = [
+        re.compile(r"Ph\.?D\.?\s+Advisor\s+([A-Z][A-Za-z.-]+(?:\s+[A-Z][A-Za-z.-]+){0,3})"),
+        re.compile(r"Advisor\s*(?:\d+)?\s*:\s*([A-Z][A-Za-z.-]+(?:\s+[A-Z][A-Za-z.-]+){0,3})"),
+        re.compile(r"advised by\s+(?:Professor\s+)?([A-Z][A-Za-z.-]+(?:\s+[A-Z][A-Za-z.-]+){0,3})", re.I),
+    ]
+    for _, result in reversed(transcript.turns):
+        texts: list[str] = [result.observation or ""]
+        spans = result.outputs.get("spans") if isinstance(result.outputs, Mapping) else None
+        if isinstance(spans, (list, tuple)):
+            texts.extend(str(x) for x in spans if str(x).strip())
+        for text in texts:
+            for pattern in patterns:
+                match = pattern.search(text)
+                if match:
+                    name = " ".join(match.group(1).split())
+                    if len(name.split()) >= 2:
+                        return name
+    return ""
 
 
 def _is_url(value: str) -> bool:

@@ -7,7 +7,7 @@ import re
 from typing import Any, Mapping
 
 from ..runtime.tool import ToolContext, ToolResult
-from ..tools import StdlibWebClient, WebClient
+from ..tools import StdlibWebClient, WebClient, extract_urls
 
 
 _WORD = re.compile(r"[A-Za-z0-9]+")
@@ -110,6 +110,7 @@ class WebFetchTool:
             "text": text,
             "fetched_urls": [url],
             "source_urls": [url],
+            "urls_detected": [u for u in extract_urls(text, limit=12) if u != url],
             "spans": [span],
             "fetched_pages": [{"url": url, "text": text[:limit_chars]}],
         }
@@ -121,6 +122,10 @@ class WebFetchTool:
                 if line.strip():
                     metadata_lines.append(line)
             outputs["answer_candidate"] = "\n".join(metadata_lines)[:1800]
+        elif "github.com/" in url and "/pull/" in url:
+            outputs["answer_candidate"] = text[:2400]
+        elif "api.github.com/repos/" in url and "/commits" in url:
+            outputs["answer_candidate"] = text[:2400]
         return ToolResult(
             tool_call_id="",
             ok=True,

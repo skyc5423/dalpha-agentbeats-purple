@@ -54,6 +54,7 @@ from purple.environment import TextEnvironment
 from purple.runtime.controller import FinalAnswer, Surrender
 from purple.runtime.llm_controller import LLMController
 from purple.runtime.rule_controller import RuleBasedController
+from purple.runtime.loop import ControllerLoop
 from purple.runtime.tool import ToolCall, ToolContext, ToolResult
 from purple.runtime.transcript import Transcript
 from purple.schema import Attachment
@@ -196,6 +197,59 @@ def test_default_registry_provides_declared_tools() -> None:
 # ---------------------------------------------------------------------------
 # Orchestrator — transcript invariants (no fixed pipeline order)
 # ---------------------------------------------------------------------------
+
+
+class _SearchOnlyWebClient:
+    async def search(self, query: str, *, limit: int = 5) -> list[dict[str, str]]:
+        return [
+            {
+                "title": "Generic search result title",
+                "url": "https://example.test/result",
+                "snippet": "Generic search result snippet, not a drafted answer.",
+            }
+        ][:limit]
+
+    async def fetch_text(self, url: str, *, limit_chars: int = 5000) -> str:
+        return ""
+
+
+@pytest.mark.asyncio
+async def test_plain_web_search_results_do_not_overwrite_source_backed_answer_candidate() -> None:
+    transcript = Transcript()
+    transcript.append(
+        ToolCall(id="fetch", name="web_fetch", args={}),
+        ToolResult(
+            tool_call_id="fetch",
+            ok=True,
+            summary="source-backed candidate",
+            outputs={
+                "answer_candidate": "Source-backed answer from fetched primary material.",
+                "source_urls": ["https://example.test/source"],
+            },
+        ),
+    )
+
+    result = await WebSearchTool(
+        web_client=_SearchOnlyWebClient(),
+        use_env_web_answerer=False,
+    ).run(
+        {"query": "generic lookup", "limit": 1},
+        ToolContext(
+            request=TaskRequest(prompt="Answer from sources."),
+            notes=transcript.notes_view(),
+            scratch={},
+            steps_remaining=3,
+        ),
+    )
+
+    transcript.append(ToolCall(id="search", name="web_search", args={}), result)
+
+    assert result.outputs.get("results")
+    assert "answer_candidate" not in result.outputs
+    assert (
+        transcript.notes_view()["answer_candidate"]
+        == "Source-backed answer from fetched primary material."
+    )
 
 
 @pytest.mark.asyncio
@@ -673,14 +727,8 @@ async def test_web_search_tool_uses_web_client_when_no_answerer() -> None:
 
 
 @pytest.mark.asyncio
-async def test_web_search_candidate_alone_triggers_sufficiency_and_more_tools() -> None:
-    """A single web_search candidate must not be treated as sufficient.
-
-    The rule controller is expected to dispatch ``sufficiency_check`` after a
-    web_search returns a partial candidate, mark it insufficient when the
-    prompt asks for multiple distinct facts the snippet doesn't cover, and
-    then escalate to ``web_fetch`` on the surfaced URL.
-    """
+async def test_plain_web_search_result_list_triggers_fetch_before_sufficiency() -> None:
+    """Plain result-list search is evidence for fetching, not a drafted answer."""
 
     class PartialWebClient:
         async def search(self, query: str, *, limit: int = 5):
@@ -713,13 +761,10 @@ async def test_web_search_candidate_alone_triggers_sufficiency_and_more_tools() 
     result = await orch.solve(req)
     capabilities = [s.capability for s in result.steps]
     assert "web_search" in capabilities
-    assert "sufficiency_check" in capabilities
-    # The runtime escalated past web_search instead of finalising on it.
-    assert capabilities.index("web_search") < capabilities.index("sufficiency_check")
-    suff_steps = [s for s in result.steps if s.capability == "sufficiency_check"]
-    assert any(s.outputs.get("sufficient") is False for s in suff_steps)
-    # web_fetch was attempted as the follow-up.
     assert "web_fetch" in capabilities
+    assert capabilities.index("web_search") < capabilities.index("web_fetch")
+    search_steps = [s for s in result.steps if s.capability == "web_search"]
+    assert all("answer_candidate" not in s.outputs for s in search_steps)
 
 
 @pytest.mark.asyncio
@@ -802,37 +847,40 @@ async def test_rule_controller_finalisation_only_after_sufficiency_or_budget() -
     """Rule controller never finalises a non-self-sufficient candidate
     without either a sufficiency_check pass or budget exhaustion."""
 
-    class RichWebClient:
+    class EmptyWebClient:
         async def search(self, query: str, *, limit: int = 5):
-            return [
-                {
-                    "title": "Example",
-                    "url": "https://example.com/x",
-                    "snippet": (
-                        "First commit covers everything in the prompt: hash,"
-                        " co-authors, source URL https://example.com/x."
-                    ),
-                }
-            ]
+            return []
 
         async def fetch_text(self, url: str, *, limit_chars: int = 5000):
             return ""
 
-    orch = Orchestrator(
-        registry=default_tools(
-            web_client=RichWebClient(),
-            web_answerer=None,
+    class DraftingWebAnswerer:
+        async def answer(self, *, prompt: str, system: str = "", max_tokens: int = 1200) -> str:
+            return "First commit hash abc123 with source URL https://example.com/x."
+
+    registry = ToolRegistry()
+    registry.register(
+        WebSearchTool(
+            web_client=EmptyWebClient(),
+            web_answerer=DraftingWebAnswerer(),
             use_env_web_answerer=False,
-        ),
-        max_steps=8,
+        )
     )
+    registry.register(SufficiencyCheckTool())
+    orch = Orchestrator(registry=registry, max_steps=8)
     req = TaskRequest(prompt="Provide the first commit hash and source URL.")
     result = await orch.solve(req)
     capabilities = [s.capability for s in result.steps]
-    # web_search produced a candidate; sufficiency_check confirmed it; only
-    # then did the finalizer commit.
+    # web_search_preview produced a drafted candidate; sufficiency_check
+    # confirmed it; only then did the finalizer commit.
     assert "web_search" in capabilities
     assert "sufficiency_check" in capabilities
+    web_search_steps = [s for s in result.steps if s.capability == "web_search"]
+    assert any(
+        s.outputs.get("source") == "openai_web_search_preview"
+        and s.outputs.get("answer_candidate")
+        for s in web_search_steps
+    )
     suff_steps = [s for s in result.steps if s.capability == "sufficiency_check"]
     assert any(s.outputs.get("sufficient") is True for s in suff_steps)
     assert capabilities[-1] == "compose"
@@ -998,6 +1046,39 @@ def test_rule_controller_fetches_source_urls_and_searches_missing_requirements()
     assert search_args is not None
     assert "authors and profiles" in str(search_args["query"])
     assert "no author evidence" in str(search_args["query"])
+
+
+def test_rule_controller_refines_advisor_lineage_query_from_discovered_advisor() -> None:
+    transcript = Transcript()
+    transcript.append(
+        ToolCall(id="c1", name="web_fetch", args={"url": "https://openreview.net/profile?id=~Yu_Su2"}),
+        ToolResult(
+            tool_call_id="c1",
+            ok=True,
+            summary="fetched profile",
+            observation="PhD Advisor Xifeng Yan 2012-2018",
+            outputs={"spans": ["OpenReview profile: PhD Advisor Xifeng Yan 2012-2018"]},
+        ),
+    )
+    transcript.append(
+        ToolCall(id="c2", name="sufficiency_check", args={}),
+        ToolResult(
+            tool_call_id="c2",
+            ok=True,
+            summary="insufficient",
+            observation="missing advisor chain",
+            outputs={"sufficient": False, "missing_or_weak_points": ["need next advisor links"]},
+        ),
+    )
+
+    search_args = RuleBasedController(max_attempts=4)._next_search_args(  # noqa: SLF001
+        TaskRequest(prompt="Trace a professor's doctoral advisor lineage upward for five generations."),
+        transcript,
+    )
+
+    assert search_args is not None
+    assert "Xifeng Yan" in str(search_args["query"])
+    assert "Mathematics Genealogy" in str(search_args["query"])
 
 
 @pytest.mark.asyncio
@@ -1456,6 +1537,174 @@ def test_io_adapter_extracts_file_attachment() -> None:
     assert len(req.attachments) == 1
     att = req.attachments[0]
     assert att.name == "note.txt"
+
+
+@pytest.mark.asyncio
+async def test_finalizer_does_not_emit_unsupported_candidate() -> None:
+    llm = FakeLLM(
+        scripted={
+            "fact_verifier": json.dumps(
+                {
+                    "confidence": 0.05,
+                    "verdict": "unsupported",
+                    "concerns": ["candidate is contradicted by evidence"],
+                }
+            ),
+            "composer": "The answer is Wrong University.",
+        }
+    )
+    transcript = Transcript()
+    transcript.append(
+        ToolCall(id="r1", name="research_answer", args={}),
+        ToolResult(
+            tool_call_id="r1",
+            ok=True,
+            summary="candidate",
+            outputs={"answer_candidate": "Wrong University", "spans": ["Evidence contradicts Wrong University"]},
+        ),
+    )
+
+    result = await Finalizer(llm=llm).run(TaskRequest(prompt="find institution"), transcript)
+
+    assert result.verdict == "unsupported"
+    assert result.answer == "Insufficient verified evidence to answer confidently."
+    assert any(call["tag"] == "composer" for call in llm.calls)
+
+
+# ---------------------------------------------------------------------------
+# Controller loop — research finalization guards
+# ---------------------------------------------------------------------------
+
+
+class _FinalizingController:
+    async def next_action(self, request, transcript, tools):
+        return FinalAnswer(answer="premature candidate")
+
+
+class _EvidenceTool:
+    name = "research_answer"
+    description = "test evidence producer"
+    arg_schema = {}
+
+    async def run(self, args, ctx):
+        return ToolResult(
+            tool_call_id="",
+            ok=True,
+            summary="evidence candidate",
+            outputs={
+                "answer_candidate": "premature candidate",
+                "spans": ["weak span"],
+            },
+        )
+
+
+class _SufficiencyTool:
+    name = "sufficiency_check"
+    description = "test sufficiency gate"
+    arg_schema = {}
+
+    async def run(self, args, ctx):
+        return ToolResult(
+            tool_call_id="",
+            ok=True,
+            summary="sufficiency=insufficient coverage=0.10",
+            outputs={
+                "sufficient": False,
+                "answer_candidate": "premature candidate",
+                "missing_or_weak_points": ["need primary evidence"],
+                "requirement_coverage": [
+                    {
+                        "requirement_id": "r1",
+                        "status": "missing",
+                        "reason": "need primary evidence",
+                    }
+                ],
+                "next_queries": ["primary source for missing evidence"],
+            },
+        )
+
+
+class _SearchTool:
+    name = "web_search"
+    description = "test follow-up search"
+    arg_schema = {"query": "query"}
+
+    async def run(self, args, ctx):
+        return ToolResult(
+            tool_call_id="",
+            ok=True,
+            summary="web_search returned 0 result(s)",
+            outputs={"query": args.get("query", ""), "results": [], "spans": []},
+        )
+
+
+@pytest.mark.asyncio
+async def test_controller_loop_forces_sufficiency_before_llm_final_answer() -> None:
+    transcript = Transcript()
+    transcript.append(
+        ToolCall(id="e1", name="research_answer", args={}),
+        ToolResult(
+            tool_call_id="e1",
+            ok=True,
+            summary="candidate",
+            outputs={"answer_candidate": "premature candidate", "spans": ["weak span"]},
+        ),
+    )
+    budget = BudgetTracker(max_steps=2, time_limit_s=None)
+    budget.start()
+    loop = ControllerLoop(
+        controller=_FinalizingController(),
+        registry={"sufficiency_check": _SufficiencyTool()},
+        budget=budget,
+        max_attempts_per_tool=2,
+    )
+
+    outcome = await loop.run(TaskRequest(prompt="research task"), transcript, {})
+
+    assert "sufficiency_check" in transcript.names()
+    assert outcome.final_answer == ""
+    assert outcome.surrendered is True
+
+
+@pytest.mark.asyncio
+async def test_controller_loop_uses_next_queries_after_insufficient_check() -> None:
+    transcript = Transcript()
+    transcript.append(
+        ToolCall(id="e1", name="research_answer", args={}),
+        ToolResult(
+            tool_call_id="e1",
+            ok=True,
+            summary="candidate",
+            outputs={"answer_candidate": "premature candidate", "spans": ["weak span"]},
+        ),
+    )
+    transcript.append(
+        ToolCall(id="s1", name="sufficiency_check", args={}),
+        ToolResult(
+            tool_call_id="s1",
+            ok=True,
+            summary="insufficient",
+            outputs={
+                "sufficient": False,
+                "answer_candidate": "premature candidate",
+                "requirement_coverage": [{"requirement_id": "r1", "status": "missing"}],
+                "next_queries": ["primary source for missing evidence"],
+            },
+        ),
+    )
+    budget = BudgetTracker(max_steps=1, time_limit_s=None)
+    budget.start()
+    loop = ControllerLoop(
+        controller=_FinalizingController(),
+        registry={"web_search": _SearchTool()},
+        budget=budget,
+        max_attempts_per_tool=2,
+    )
+
+    await loop.run(TaskRequest(prompt="research task"), transcript, {})
+
+    assert transcript.turns[-1][0].name == "web_search"
+    assert transcript.turns[-1][0].args["query"] == "primary source for missing evidence"
 
 
 # ---------------------------------------------------------------------------

@@ -69,11 +69,13 @@ def openai_web_search_from_env() -> WebAnswerer | None:
     api_key = os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY")
     if not api_key:
         return None
+    # Keep the web-search Responses call on a known search-capable default.
+    # Controller/chat model env vars (for example gpt-5.x mini variants) may not
+    # support ``web_search_preview`` and previously caused silent no-search
+    # fallbacks. Only explicit web-search env vars should override this default.
     model = (
         os.getenv("OPENAI_WEB_SEARCH_MODEL")
         or os.getenv("OPENAI_RESPONSES_MODEL")
-        or os.getenv("OPENAI_MODEL")
-        or os.getenv("LLM_MODEL")
         or "gpt-4o-mini"
     )
     base_url = os.getenv("OPENAI_BASE_URL") or os.getenv("LLM_BASE_URL") or "https://api.openai.com/v1"

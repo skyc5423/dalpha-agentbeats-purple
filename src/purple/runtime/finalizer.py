@@ -85,6 +85,25 @@ def _is_structured_github_commit_metadata(text: str) -> bool:
     )
 
 
+def _answer_repeats_rejected_candidate(answer: str, candidate: str) -> bool:
+    """Return True when composer merely restates an unsupported candidate."""
+
+    answer_norm = " ".join((answer or "").lower().split())
+    candidate_norm = " ".join((candidate or "").lower().split())
+    if not answer_norm or not candidate_norm:
+        return False
+    if len(candidate_norm) >= 12 and candidate_norm in answer_norm:
+        return True
+    cand_tokens = _content_tokens(candidate_norm)
+    ans_tokens = _content_tokens(answer_norm)
+    if not cand_tokens:
+        return False
+    # For short entity-like candidates, repeating most content tokens is enough
+    # to treat the answer as the same rejected claim.
+    overlap = cand_tokens & ans_tokens
+    return len(cand_tokens) <= 5 and len(overlap) / max(1, len(cand_tokens)) >= 0.8
+
+
 @dataclass(frozen=True)
 class FinalizationResult:
     answer: str
@@ -178,6 +197,9 @@ class Finalizer:
                     transcript.latest_output("requirements") or {},
                 )
                 used_llm = bool(answer)
+                if verification["verdict"] == "unsupported" and _answer_repeats_rejected_candidate(answer, candidate):
+                    answer = ""
+                    used_llm = False
             if not answer:
                 answer = self._fallback_answer(candidate, spans, verification["verdict"])
             source = "llm" if used_llm else "fallback"
@@ -448,6 +470,8 @@ class Finalizer:
         candidate = candidate.strip()
         if candidate and verdict != "unsupported":
             return candidate
+        if verdict == "unsupported":
+            return "Insufficient verified evidence to answer confidently."
         if spans:
             return _truncate(spans[0])
         return "Insufficient information in provided context to answer confidently."
