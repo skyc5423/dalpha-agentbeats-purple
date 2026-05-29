@@ -31,6 +31,33 @@ PAYLOAD = [
     },
 ]
 
+PAGE1_PAYLOAD = [
+    {
+        "sha": "cccccccccccccccccccccccccccccccccccccccc",
+        "html_url": "https://github.com/org/repo/commit/cccccccc",
+        "commit": {
+            "author": {"name": "Newest Author", "email": "newest@example.com", "date": "2024-03-03T00:00:00Z"},
+            "committer": {"name": "Newest Committer", "email": "newestc@example.com", "date": "2024-03-03T00:00:01Z"},
+            "message": "newest change",
+        },
+        "author": {"login": "newestauthor", "html_url": "https://github.com/newestauthor"},
+    },
+]
+
+PAGE2_PAYLOAD = [
+    {
+        "sha": "dddddddddddddddddddddddddddddddddddddddd",
+        "html_url": "https://github.com/org/repo/commit/dddddddd",
+        "commit": {
+            "author": {"name": "First Path Author", "email": "first@example.com", "date": "2023-12-07T08:30:47Z"},
+            "committer": {"name": "First Committer", "email": "firstc@example.com", "date": "2023-12-07T08:30:48Z"},
+            "message": "Add path model support\n\nCo-authored-by: Helper Dev <123+helperdev@users.noreply.github.com>",
+        },
+        "author": {"login": "firstauthor", "html_url": "https://github.com/firstauthor"},
+        "committer": {"login": "firstcommitter", "html_url": "https://github.com/firstcommitter"},
+    },
+]
+
 
 class FakeResponse:
     def __enter__(self):
@@ -45,6 +72,28 @@ class FakeResponse:
 
 def _fake_urlopen(req, timeout):
     return FakeResponse()
+
+
+def _fake_paginated_urlopen(req, timeout):
+    class Resp:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self):
+            url = getattr(req, "full_url", str(req))
+            if "/users/helperdev" in url:
+                return json.dumps({"name": "Helper Real"}).encode()
+            if "/users/firstauthor" in url:
+                return json.dumps({"name": "First Real"}).encode()
+            if "/users/firstcommitter" in url:
+                return json.dumps({"name": "First Committer Real"}).encode()
+            if "/commits/dddddddd" in url:
+                return json.dumps(PAGE2_PAYLOAD[-1]).encode()
+            if "page=2" in url:
+                return json.dumps(PAGE2_PAYLOAD).encode()
+            if "page=3" in url:
+                return json.dumps([]).encode()
+            return json.dumps(PAGE1_PAYLOAD * 100).encode()
+    return Resp()
 
 
 @pytest.mark.asyncio
@@ -80,9 +129,36 @@ def test_stdlib_github_commits_api_formatter(monkeypatch):
 
     assert "Repository: org/repo" in text
     assert "Path filter: src/model" in text
-    assert "Oldest commit on this returned page" in text
+    assert "Oldest commit across fetched pages" in text
     assert "aaaaaaaaaaaa" in text
     assert "@oldauthor" in text
+
+
+def test_stdlib_github_html_commits_path_uses_paginated_api(monkeypatch):
+    monkeypatch.setattr("urllib.request.urlopen", _fake_paginated_urlopen)
+    text = StdlibWebClient()._sync_fetch_text(
+        "https://github.com/org/repo/commits/main/src/model",
+        8000,
+    )
+
+    assert "Repository: org/repo" in text
+    assert "Path filter: src/model" in text
+    assert "Oldest commit across fetched pages" in text
+    assert "dddddddddddd" in text
+    assert "Add path model support" in text
+    assert "Co-author with GitHub profile" in text
+    assert "@helperdev" in text
+
+
+def test_stdlib_github_commit_search_accepts_site_github_repo_query(monkeypatch):
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+    results = StdlibWebClient()._github_commit_search(
+        "site:github.com/org/repo LLaVA support first commit main branch",
+        5,
+    )
+
+    assert results
+    assert results[-1]["url"] == "https://github.com/org/repo/commit/aaaaaaaa"
 
 
 PULL_PAYLOAD = {

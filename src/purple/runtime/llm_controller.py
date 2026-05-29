@@ -79,6 +79,8 @@ class LLMController:
                 proposed = data.get("name", "")
                 if not isinstance(proposed, str) or proposed not in _INFO_GATHERING_TOOLS:
                     return await self._fallback.next_action(request, transcript, tools)
+                if proposed == "web_search" and _has_unfetched_url(transcript):
+                    return await self._fallback.next_action(request, transcript, tools)
         if action == "final":
             answer = data.get("answer", "")
             return FinalAnswer(answer=answer if isinstance(answer, str) else "")
@@ -191,6 +193,29 @@ def _blocking_requirement_points(notes: Mapping[str, Any]) -> list[str]:
             reason = str(item.get("reason") or status)
             points.append(f"{rid}: {reason}")
     return points
+
+
+def _has_unfetched_url(transcript: Transcript) -> bool:
+    fetched: set[str] = set()
+    candidates: list[str] = []
+    for _, result in transcript.turns:
+        if not result.ok:
+            continue
+        for value in result.outputs.get("fetched_urls") or []:
+            if isinstance(value, str):
+                fetched.add(value)
+        for value in result.outputs.get("source_urls") or []:
+            if isinstance(value, str):
+                candidates.append(value)
+        for value in result.outputs.get("urls_detected") or []:
+            if isinstance(value, str):
+                candidates.append(value)
+        results = result.outputs.get("results")
+        if isinstance(results, list):
+            for item in results:
+                if isinstance(item, Mapping) and isinstance(item.get("url"), str):
+                    candidates.append(str(item["url"]))
+    return any(url.startswith(("http://", "https://")) and url not in fetched for url in candidates)
 
 
 def _truncate_notes(notes: dict[str, Any]) -> dict[str, Any]:

@@ -203,6 +203,8 @@ class StdlibWebClient:
     def _github_commit_search(self, query: str, limit: int) -> list[dict[str, str]]:
         qlow = query.lower()
         repo_match = re.search(r"repo:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", query)
+        if repo_match is None:
+            repo_match = re.search(r"site:github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", query, re.I)
         repo = repo_match.group(1) if repo_match else ""
         if not repo or "commit" not in qlow:
             return []
@@ -229,6 +231,8 @@ class StdlibWebClient:
             "names",
             "contributors",
             "contributor",
+            "site",
+            "com",
         }
         terms = []
         repo_parts = {part.lower() for part in repo.split("/")}
@@ -258,7 +262,8 @@ class StdlibWebClient:
         except Exception:
             return []
         out: list[dict[str, str]] = []
-        for item in data.get("items", [])[:limit]:
+        items = data.get("items", []) if isinstance(data, dict) else data if isinstance(data, list) else []
+        for item in items[:limit]:
             commit = item.get("commit", {}) or {}
             author = commit.get("author", {}) or {}
             message = (commit.get("message") or "").split("\n", 1)[0]
@@ -274,6 +279,9 @@ class StdlibWebClient:
         github_text = self._fetch_github_commit_api_text(url, limit_chars)
         if github_text:
             return github_text
+        github_html_list_text = self._fetch_github_html_commits_list_api_text(url, limit_chars)
+        if github_html_list_text:
+            return github_html_list_text
         github_list_text = self._fetch_github_commits_list_api_text(url, limit_chars)
         if github_list_text:
             return github_list_text
@@ -289,6 +297,37 @@ class StdlibWebClient:
             return math_genealogy_text[:limit_chars]
         return html_to_text(raw, limit_chars=limit_chars)
 
+    def _fetch_github_html_commits_list_api_text(self, url: str, limit_chars: int) -> str:
+        """Format GitHub HTML commit-history URLs through the commits API.
+
+        GitHub's web UI pages such as
+        ``/commits/main/src/transformers/models/llava`` are not source-rich after
+        simple HTML stripping, but they encode a generic repo/ref/path history
+        query. Convert them to the public commits API so first-commit/path-history
+        tasks can see structured dates, authors, and commit URLs without any
+        benchmark-specific routing.
+        """
+        parsed = urllib.parse.urlparse(url)
+        if parsed.netloc.lower() != "github.com":
+            return ""
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) < 4 or parts[2] != "commits":
+            return ""
+        owner, repo_name, _, ref, *path_bits = parts
+        if not owner or not repo_name or not ref or not path_bits:
+            return ""
+        api_url = "https://api.github.com/repos/{repo}/commits?".format(
+            repo=f"{owner}/{repo_name}"
+        ) + urllib.parse.urlencode(
+            {
+                "sha": ref,
+                "path": "/".join(path_bits),
+                "per_page": "100",
+                "page": "1",
+            }
+        )
+        return self._fetch_github_commits_list_api_text(api_url, limit_chars)
+
     def _fetch_github_commits_list_api_text(self, url: str, limit_chars: int) -> str:
         parsed = urllib.parse.urlparse(url)
         if parsed.netloc.lower() != "api.github.com":
@@ -297,30 +336,54 @@ class StdlibWebClient:
         if not match:
             return ""
         repo = match.group(1)
-        req = urllib.request.Request(url, headers={"User-Agent": self._user_agent})
-        try:
-            with urllib.request.urlopen(req, timeout=self._timeout_s) as resp:
-                data = json.loads(resp.read().decode("utf-8", errors="replace"))
-        except Exception:
-            return ""
-        if not isinstance(data, list) or not data:
-            return ""
         query = urllib.parse.parse_qs(parsed.query)
+        requested_page = int((query.get("page") or ["1"])[0] or "1")
+        per_page = min(100, int((query.get("per_page") or ["100"])[0] or "100"))
+        # If this is a path-history query, walk a bounded number of pages so the
+        # oldest/first commit is not mistaken for merely the oldest item on page
+        # 1. For unfiltered lists, keep the single requested page behavior to
+        # avoid excessive API traffic.
+        should_paginate = bool((query.get("path") or [""])[0]) and requested_page == 1
+        pages_to_fetch = range(1, 11) if should_paginate else range(requested_page, requested_page + 1)
+        data: list[object] = []
+        pages_fetched = 0
+        for page_no in pages_to_fetch:
+            page_query = dict(query)
+            page_query["per_page"] = [str(per_page)]
+            page_query["page"] = [str(page_no)]
+            page_url = urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(page_query, doseq=True)))
+            req = urllib.request.Request(page_url, headers={"User-Agent": self._user_agent})
+            try:
+                with urllib.request.urlopen(req, timeout=self._timeout_s) as resp:
+                    page_data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            except Exception:
+                break
+            if not isinstance(page_data, list) or not page_data:
+                break
+            data.extend(page_data)
+            pages_fetched += 1
+            if len(page_data) < per_page:
+                break
+        if not data:
+            return ""
         path_filter = (query.get("path") or [""])[0]
         sha_filter = (query.get("sha") or [""])[0]
-        page = (query.get("page") or [""])[0]
-        per_page = (query.get("per_page") or [""])[0]
         lines = [
             f"GitHub commits API URL: {url}",
             f"Repository: {repo}",
             f"Branch/ref: {sha_filter or '(default)'}",
             f"Path filter: {path_filter or '(none)'}",
-            f"Page/per_page: {page or '1'}/{per_page or str(len(data))}",
-            f"Commits returned on this page: {len(data)}",
+            f"Pages fetched/per_page: {pages_fetched}/{per_page}",
+            f"Commits returned across fetched pages: {len(data)}",
             "GitHub returns this endpoint newest-to-oldest unless pagination/order is changed.",
         ]
         oldest = data[-1]
-        lines.extend(["Oldest commit on this returned page:", *_format_github_commit_summary(oldest)])
+        lines.extend(["Oldest commit across fetched pages:", *_format_github_commit_summary(oldest)])
+        if isinstance(oldest, dict) and oldest.get("html_url"):
+            oldest_detail = self._fetch_github_commit_api_text(str(oldest.get("html_url")), limit_chars)
+            if oldest_detail:
+                lines.append("Oldest commit detailed metadata:")
+                lines.append(oldest_detail)
         lines.append("Commits on this page, newest to oldest:")
         for item in data[: min(len(data), 40)]:
             lines.extend(_format_github_commit_summary(item))
@@ -374,6 +437,8 @@ class StdlibWebClient:
             with urllib.request.urlopen(req, timeout=self._timeout_s) as resp:
                 data = json.loads(resp.read().decode("utf-8", errors="replace"))
         except Exception:
+            return ""
+        if not isinstance(data, dict):
             return ""
         commit = data.get("commit", {}) or {}
         author = commit.get("author", {}) or {}
