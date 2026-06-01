@@ -37,7 +37,7 @@ class FakeOrchestrator:
                 ),
             ),
             profile=CapabilityProfile(scores={}, selected=()),
-            budget=BudgetSnapshot(steps_used=1, steps_limit=40, elapsed_s=0.1, time_limit_s=600.0),
+            budget=BudgetSnapshot(steps_used=1, steps_limit=16, elapsed_s=0.1, time_limit_s=240.0),
             confidence=0.7,
             flags=(),
         )
@@ -108,7 +108,7 @@ async def test_agent_sends_final_status_only_without_debug_artifact_by_default(m
     stderr = capsys.readouterr().err
     assert "PURPLE_TRACE" in stderr
     assert '"event": "purple_result"' in stderr
-    assert '"steps_limit": 40' in stderr
+    assert '"steps_limit": 16' in stderr
 
 
 @pytest.mark.asyncio

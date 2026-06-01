@@ -181,7 +181,7 @@ def test_orchestrator_reads_budget_from_env(monkeypatch) -> None:
     assert orch._max_attempts_per_tool == 5
 
 
-def test_orchestrator_defaults_to_expanded_submission_budget(monkeypatch) -> None:
+def test_orchestrator_defaults_to_timeout_safe_submission_budget(monkeypatch) -> None:
     monkeypatch.delenv("PURPLE_MAX_STEPS", raising=False)
     monkeypatch.delenv("PURPLE_TIME_LIMIT_S", raising=False)
     monkeypatch.delenv("PURPLE_MAX_ATTEMPTS_PER_TOOL", raising=False)
@@ -189,9 +189,9 @@ def test_orchestrator_defaults_to_expanded_submission_budget(monkeypatch) -> Non
 
     orch = Orchestrator()
 
-    assert orch._max_steps == 40
-    assert orch._time_limit_s == 600.0
-    assert orch._max_attempts_per_tool == 6
+    assert orch._max_steps == 16
+    assert orch._time_limit_s == 240.0
+    assert orch._max_attempts_per_tool == 4
 
 
 # ---------------------------------------------------------------------------
@@ -2679,13 +2679,13 @@ async def test_finalizer_downgrades_supported_llm_verdict_when_requirement_table
 
     assert result.verdict == "unsupported"
     assert result.confidence <= 0.05
-    assert result.source == "fallback"
-    assert result.answer == "Insufficient verified evidence to answer confidently."
+    assert result.source == "llm"
+    assert result.answer == "Candidate University"
     assert transcript.turns[-2][1].outputs["source"] == "llm+requirement_gate"
 
 
 @pytest.mark.asyncio
-async def test_finalizer_does_not_compose_unsupported_multi_requirement_answer() -> None:
+async def test_finalizer_composes_best_effort_unsupported_multi_requirement_answer() -> None:
     def responder(messages, tag):
         if tag == "fact_verifier":
             return json.dumps({"confidence": 0.02, "verdict": "unsupported", "concerns": ["missing direct evidence"]})
@@ -2727,8 +2727,8 @@ async def test_finalizer_does_not_compose_unsupported_multi_requirement_answer()
     )
 
     assert result.verdict == "unsupported"
-    assert result.source == "fallback"
-    assert result.answer == "Insufficient verified evidence to answer confidently."
+    assert result.source == "llm"
+    assert result.answer == "Unsupported University"
 
 
 # ---------------------------------------------------------------------------
@@ -2776,6 +2776,68 @@ async def test_policy_flag_produces_safe_user_answer() -> None:
 # ---------------------------------------------------------------------------
 # Controller loop behaviour
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_controller_loop_forces_initial_external_research_before_final() -> None:
+    class FinalImmediately:
+        async def next_action(self, request, transcript, tools):
+            return FinalAnswer(answer="premature")
+
+    class RecordingResearchTool:
+        name = "research_answer"
+        description = "research"
+        arg_schema = {}
+
+        async def run(self, args, ctx):
+            return ToolResult(
+                tool_call_id="",
+                ok=True,
+                summary="research attempted",
+                outputs={"spans": ["Search evidence"], "answer_candidate": "best effort"},
+            )
+
+    transcript = Transcript()
+    budget = BudgetTracker(max_steps=1, time_limit_s=None)
+    budget.start()
+
+    await ControllerLoop(
+        controller=FinalImmediately(),
+        registry={"research_answer": RecordingResearchTool()},
+        budget=budget,
+    ).run(TaskRequest(prompt="Find the current homepage URL for Example Corp."), transcript, {})
+
+    assert transcript.turns[0][0].name == "research_answer"
+
+
+@pytest.mark.asyncio
+async def test_controller_loop_times_out_slow_tool() -> None:
+    class SearchController:
+        async def next_action(self, request, transcript, tools):
+            return ToolCall(id="slow", name="web_search", args={"query": "example"})
+
+    class SlowSearchTool:
+        name = "web_search"
+        description = "slow search"
+        arg_schema = {}
+
+        async def run(self, args, ctx):
+            await asyncio.sleep(0.05)
+            return ToolResult(tool_call_id="", ok=True, summary="too late", outputs={})
+
+    transcript = Transcript()
+    budget = BudgetTracker(max_steps=1, time_limit_s=None)
+    budget.start()
+
+    await ControllerLoop(
+        controller=SearchController(),
+        registry={"web_search": SlowSearchTool()},
+        budget=budget,
+        tool_timeout_s=0.001,
+    ).run(TaskRequest(prompt="Find an answer online."), transcript, {})
+
+    assert transcript.turns[0][1].ok is False
+    assert transcript.turns[0][1].error == "tool-timeout"
 
 
 def _scripted_controller(actions: list[dict]) -> object:

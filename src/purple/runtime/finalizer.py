@@ -160,6 +160,7 @@ def _looks_like_raw_evidence_fallback(text: str) -> bool:
         return False
     raw_prefixes = (
         "search result:",
+        "search result ",
         "fetched source ",
         "source excerpt:",
         "web result:",
@@ -254,23 +255,28 @@ class Finalizer:
             if _is_structured_github_commit_metadata(candidate):
                 answer = candidate
             elif self._llm is not None and (candidate or spans):
-                if verification["verdict"] == "unsupported" and _has_multi_requirement_gate(transcript.latest_output("requirements") or {}):
-                    answer = ""
-                    used_llm = False
-                else:
-                    answer = await self._llm_compose(
-                        request,
-                        candidate,
-                        spans,
-                        verification,
-                        transcript.latest_output("requirements") or {},
-                    )
-                    used_llm = bool(answer)
-                if verification["verdict"] == "unsupported" and _answer_repeats_rejected_candidate(answer, candidate):
+                answer = await self._llm_compose(
+                    request,
+                    candidate,
+                    spans,
+                    verification,
+                    transcript.latest_output("requirements") or {},
+                )
+                used_llm = bool(answer)
+                if (
+                    verification["verdict"] == "unsupported"
+                    and not _has_multi_requirement_gate(transcript.latest_output("requirements") or {})
+                    and _answer_repeats_rejected_candidate(answer, candidate)
+                ):
                     answer = ""
                     used_llm = False
             if not answer:
-                answer = self._fallback_answer(candidate, spans, verification["verdict"])
+                answer = self._fallback_answer(
+                    candidate,
+                    spans,
+                    verification["verdict"],
+                    transcript.latest_output("requirements") or {},
+                )
             source = "llm" if used_llm else "fallback"
 
         compose_call = ToolCall(id="final-compose", name="compose", args={})
@@ -559,15 +565,17 @@ class Finalizer:
             "concerns": list(verification["concerns"]),
             "evidence_spans": list(spans),
             "composition_policy": (
-                "Always produce the best benchmark answer from supported evidence. "
-                "If rejected_candidate is present, do not use it as a source of truth; "
-                "use verifier concerns to identify contradictions, then answer from evidence_spans."
+                "Always produce the best benchmark answer from available evidence. "
+                "Do not answer with 'insufficient', 'unable', or similar non-answer text unless there is literally no relevant evidence at all. "
+                "If requirements.required_outputs is present, fill every requested output slot in the same order and concise shape requested by the user. "
+                "If evidence is incomplete, provide the best-supported partial answer rather than refusing; omit explanations about uncertainty unless the user asked for them. "
+                "If rejected_candidate is present, do not use it blindly as a source of truth; use verifier concerns to identify contradictions, then answer from evidence_spans."
             ),
         }
         user_text = (
             "Inputs (JSON):\n"
             + json.dumps(user_payload, ensure_ascii=False, indent=2)
-            + "\n\nWrite the final user-visible answer now."
+            + "\n\nWrite the final user-visible answer now. Fill the requested slots directly; do not include debug JSON or a rationale."
         )
         try:
             text = await self._llm.complete(
@@ -583,14 +591,24 @@ class Finalizer:
         return (text or "").strip()
 
     @staticmethod
-    def _fallback_answer(candidate: str, spans: list[str], verdict: str) -> str:
+    def _fallback_answer(candidate: str, spans: list[str], verdict: str, requirements: Any) -> str:
         candidate = candidate.strip()
-        if candidate and verdict != "unsupported":
+        multi_requirement = _has_multi_requirement_gate(requirements)
+        if (
+            candidate
+            and not _is_insufficient_non_answer(candidate)
+            and not _looks_like_raw_evidence_fallback(candidate)
+            and (verdict != "unsupported" or multi_requirement)
+        ):
             return candidate
+        if (
+            spans
+            and (verdict != "unsupported" or multi_requirement)
+            and not (verdict == "unsupported" and _looks_like_raw_evidence_fallback(spans[0]))
+        ):
+            return _truncate(spans[0])
         if verdict == "unsupported":
             return "Insufficient verified evidence to answer confidently."
-        if spans:
-            return _truncate(spans[0])
         return "Insufficient information in provided context to answer confidently."
 
     @staticmethod

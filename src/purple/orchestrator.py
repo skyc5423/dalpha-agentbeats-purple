@@ -120,9 +120,9 @@ class Orchestrator:
 
             registry = default_tools(llm=self._llm)
         self._registry = registry
-        self._max_steps = max_steps if max_steps is not None else _env_int("PURPLE_MAX_STEPS", 40)
+        self._max_steps = max_steps if max_steps is not None else _env_int("PURPLE_MAX_STEPS", 16)
         resolved_time_limit_s: float | None = (
-            _env_float("PURPLE_TIME_LIMIT_S", 600.0)
+            _env_float("PURPLE_TIME_LIMIT_S", 240.0)
             if time_limit_s is _DEFAULT_TIME_LIMIT
             else time_limit_s  # type: ignore[assignment]
         )
@@ -131,10 +131,10 @@ class Orchestrator:
         self._max_attempts_per_tool = (
             max_attempts_per_tool
             if max_attempts_per_tool is not None
-            else _env_int("PURPLE_MAX_ATTEMPTS_PER_TOOL", 6)
+            else _env_int("PURPLE_MAX_ATTEMPTS_PER_TOOL", 4)
         )
         self._step_callback = step_callback
-        if self._step_callback is None and _env_enabled("PURPLE_TRACE_STEPS", True):
+        if self._step_callback is None and _env_enabled("PURPLE_TRACE_STEPS", False):
             self._step_callback = _stderr_step_trace
         self._controller: Controller = controller or self._default_controller()
         self._finalizer = finalizer or Finalizer(llm=self._llm)
