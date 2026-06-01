@@ -250,6 +250,59 @@ async def test_web_fetch_exposes_detected_urls_for_followup_fetches():
     assert "https://www.mathgenealogy.org/id.php?id=72247" in result.outputs["urls_detected"]
 
 
+def test_multiclue_search_filter_drops_unrelated_zero_overlap_results():
+    from purple.tools_api.web_search import _is_low_value_or_benchmark_result
+
+    item = {
+        "title": "Interstellar streaming where to watch",
+        "url": "https://example.com/movie/interstellar",
+        "snippet": "A science fiction film listing with cast and streaming providers.",
+    }
+
+    assert _is_low_value_or_benchmark_result(
+        item,
+        query='"bank" "management" "tribute" "ceremony" university "2022" -jobs -linkedin',
+    )
+
+
+def test_stdlib_open_detects_pdf_magic_even_without_pdf_extension(monkeypatch):
+    calls = []
+
+    def fake_pdf_bytes_to_text(raw: bytes, *, limit_chars: int = 5000) -> str:
+        calls.append(raw[:5])
+        return "decoded pdf evidence"
+
+    class FakePdfNoExtensionClient(StdlibWebClient):
+        def _open_bytes(self, url: str):
+            return b"%PDF-1.7 fake", "application/octet-stream", "utf-8"
+
+    monkeypatch.setattr("purple.tools.web.pdf_bytes_to_text", fake_pdf_bytes_to_text)
+
+    assert FakePdfNoExtensionClient()._open("https://example.edu/article/download/1/2/3") == "decoded pdf evidence"
+    assert calls == [b"%PDF-"]
+
+
+def test_stdlib_html_fetch_preserves_anchor_hrefs_for_followup_sources():
+    html = """
+    <html><body>
+      <nav><a href="/">Home</a></nav>
+      <h1>Newsletter Archive</h1>
+      <a href="news%20letter/vol33.pdf">Download PDF</a>
+      <a href="/pressandmedia.php">Press and media</a>
+    </body></html>
+    """
+
+    class FakeArchiveClient(StdlibWebClient):
+        def _open(self, url: str) -> str:
+            return html
+
+    text = FakeArchiveClient()._sync_fetch_text("https://www.example.edu/news_letter.php", 1200)
+
+    assert "Detected page links:" in text
+    assert "Download PDF: https://www.example.edu/news%20letter/vol33.pdf" in text
+    assert "Press and media: https://www.example.edu/pressandmedia.php" in text
+
+
 @pytest.mark.asyncio
 async def test_sufficiency_rejects_unstructured_github_commit_candidate():
     from purple.tools_api.sufficiency_check import SufficiencyCheckTool

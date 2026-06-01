@@ -11,8 +11,25 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SRC_ROOT = REPO_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
 from purple.orchestrator import Orchestrator
 from purple.schema import TaskRequest
+
+
+def _trace_from_steps(steps: Any) -> list[dict[str, Any]]:
+    return [
+        {
+            "step": i + 1,
+            "capability": step.capability,
+            "summary": step.summary,
+            "outputs": _shrink(dict(step.outputs)),
+        }
+        for i, step in enumerate(steps)
+    ]
 
 
 def _score(answer: str, markers: list[str]) -> dict[str, Any]:
@@ -48,6 +65,19 @@ def _shrink(value: Any, limit: int = 1200) -> Any:
 
 
 async def _run_case(case: dict[str, Any], orch: Orchestrator, out_dir: Path) -> dict[str, Any]:
+    partial_path = out_dir / f"{case.get('sample_id', 'case')}.partial.json"
+    partial_path.write_text(
+        json.dumps(
+            {
+                "sample_id": case.get("sample_id", ""),
+                "model": _model_name(),
+                "status": "started",
+                "prompt": case.get("prompt", ""),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     result = await orch.solve(TaskRequest(prompt=str(case["prompt"])))
     row = {
         "benchmark": case.get("benchmark", ""),
@@ -66,19 +96,25 @@ async def _run_case(case: dict[str, Any], orch: Orchestrator, out_dir: Path) -> 
         },
         "capabilities": [step.capability for step in result.steps],
         "summaries": [step.summary for step in result.steps],
-        "trace": [
-            {
-                "step": i + 1,
-                "capability": step.capability,
-                "summary": step.summary,
-                "outputs": _shrink(dict(step.outputs)),
-            }
-            for i, step in enumerate(result.steps)
-        ],
+        "trace": _trace_from_steps(result.steps),
         "score_probe": _score(result.answer, list(case.get("expected_markers") or [])),
     }
     case_path = out_dir / f"{row['sample_id']}.json"
     case_path.write_text(json.dumps(row, ensure_ascii=False, indent=2))
+    partial_path.write_text(
+        json.dumps(
+            {
+                "sample_id": row["sample_id"],
+                "model": row["model"],
+                "status": "completed",
+                "final_artifact_path": str(case_path),
+                "steps_used": row["budget"]["steps_used"],
+                "elapsed_s": row["budget"]["elapsed_s"],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     row["artifact_path"] = str(case_path)
     print(json.dumps({k: row[k] for k in ["benchmark", "sample_id", "model", "confidence", "flags", "score_probe", "artifact_path"]}, ensure_ascii=False), flush=True)
     return row
@@ -169,14 +205,44 @@ async def main() -> int:
     }
     (out_dir / "run_meta.json").write_text(json.dumps(run_meta, ensure_ascii=False, indent=2))
 
+    current_partial_path: Path | None = None
+    current_case: dict[str, Any] | None = None
+
+    def _write_partial(transcript: Any, budget: Any) -> None:
+        if current_partial_path is None or current_case is None:
+            return
+        snapshot = budget.snapshot()
+        steps = transcript.to_step_records()
+        payload = {
+            "sample_id": current_case.get("sample_id", ""),
+            "benchmark": current_case.get("benchmark", ""),
+            "category": current_case.get("category", ""),
+            "model": _model_name(),
+            "status": "running",
+            "budget": {
+                "steps_used": snapshot.steps_used,
+                "steps_limit": snapshot.steps_limit,
+                "elapsed_s": snapshot.elapsed_s,
+                "time_limit_s": snapshot.time_limit_s,
+            },
+            "capabilities": [step.capability for step in steps],
+            "trace": _trace_from_steps(steps),
+        }
+        current_partial_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+
     orch = Orchestrator(
         max_steps=args.max_steps,
         time_limit_s=args.time_limit_s,
         max_attempts_per_tool=args.max_attempts_per_tool,
+        step_callback=_write_partial,
     )
     rows = []
     for case in samples:
+        current_case = case
+        current_partial_path = out_dir / f"{case.get('sample_id', 'case')}.partial.json"
         rows.append(await _run_case(case, orch, out_dir))
+        current_case = None
+        current_partial_path = None
     (out_dir / "summary.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2))
     _write_matrix(rows, out_dir)
 

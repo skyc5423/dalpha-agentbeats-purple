@@ -15,7 +15,7 @@ from typing import Any, Mapping
 
 from ..prompts import load_prompt
 from ..runtime.tool import ToolContext, ToolResult
-from ..tools import WebAnswerer, openai_web_search_from_env
+from ..tools import WebAnswerer, extract_urls, openai_web_search_from_env
 
 
 _FAILURE_MARKERS = (
@@ -95,7 +95,13 @@ class ResearchAnswerTool:
         answer = await self._web_answerer.answer(
             prompt=(
                 "Research and answer this task using public web sources. Return a concise final answer with URLs for critical claims. "
-                "Explicitly cover every non-optional required output; if one cannot be supported, say what is missing.\n\n"
+                "Explicitly cover every non-optional required output; if one cannot be supported, say what is missing. "
+                "For multi-clue entity questions, first decompose the clues and build a requirement coverage table: "
+                "for each clue list the candidate entity, source URL, date if relevant, and a short quoted/visible evidence phrase. "
+                "Do candidate-independent discovery before naming a final entity: search the rarest clue/source first, then chain follow-up searches from that source's institution/domain/date. "
+                "For paired date clues, prefer this order: find the first dated article/source URL, compute the derived date (for example seven days later), then search that derived date plus the next clue. "
+                "Reject mixed-entity chains; all satisfied clues must point to the same entity/institution/domain or be explicitly cross-verified. "
+                "Make date arithmetic explicit when the task says things like 'fourth Sunday' or 'seven days after'.\n\n"
                 f"Task:\n{question}"
                 + req_text
             ),
@@ -103,6 +109,7 @@ class ResearchAnswerTool:
             max_tokens=max_tokens,
         )
         answer = (answer or "").strip()
+        urls_detected = extract_urls(answer, limit=8) if answer else []
         looks_failed = _looks_like_failed(answer)
         return ToolResult(
             tool_call_id="",
@@ -116,6 +123,8 @@ class ResearchAnswerTool:
             outputs={
                 "answer_candidate": answer if answer and not looks_failed else "",
                 "spans": [answer[:6000]] if answer else [],
+                "source_urls": urls_detected,
+                "urls_detected": urls_detected,
                 "source": "llm_web_research",
                 # Do not mark LLM web research as self-sufficient. The answer may
                 # be semantically plausible but still unsupported or scoped

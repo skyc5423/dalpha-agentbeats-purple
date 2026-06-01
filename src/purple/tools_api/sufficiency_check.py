@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import json
+from urllib.parse import urlparse
 from typing import Any, Mapping
 
 from ..llm import ChatMessage, LLMClient
@@ -79,6 +80,198 @@ def _dedupe(items: list[str]) -> list[str]:
         seen.add(key)
         out.append(key)
     return out
+
+
+def _required_items(requirements: Any) -> list[Mapping[str, Any]]:
+    if not isinstance(requirements, Mapping):
+        return []
+    raw_required = requirements.get("required_outputs")
+    if not isinstance(raw_required, list):
+        return []
+    return [
+        item
+        for item in raw_required
+        if isinstance(item, Mapping) and not bool(item.get("optional", False))
+    ]
+
+
+_CONTRADICTION_MARKERS = (
+    " not ",
+    " does not ",
+    " did not ",
+    " cannot ",
+    " no evidence ",
+    " no source ",
+    " unavailable ",
+    " cannot be verified ",
+    " cannot verify ",
+    " insufficient ",
+    " not the fourth ",
+    " not in a capital ",
+    " not in the capital ",
+    " do not provide ",
+    " available sources do not ",
+    " not specified ",
+    " not detailed ",
+    " not supported ",
+    " does not establish ",
+)
+
+
+def _criterion_letter_from_id(rid: str) -> str:
+    match = re.search(r"(?:criterion|clue)_([a-z])(?:_|$)", rid.lower())
+    return match.group(1) if match else ""
+
+
+def _criterion_section(evidence_text: str, rid: str) -> str:
+    """Return the local candidate/evidence section for a requirement id.
+
+    LLM research drafts often present multi-clue candidates as "Criterion A",
+    "Criterion B", etc. Aggregate token coverage can be high even when a section
+    explicitly says the candidate fails that clue (for example "not the fourth
+    Sunday"). Local sections let the heuristic detect those contradictions
+    without knowing a benchmark answer.
+    """
+
+    letter = _criterion_letter_from_id(rid)
+    if not letter:
+        return ""
+    pattern = re.compile(
+        rf"(?is)(?:^|\n)\s*(?:[*#\-\s]*)(?:criterion|clue)\s*{re.escape(letter)}\b[\s:.)-]*(.*?)(?=(?:\n\s*(?:[*#\-\s]*)(?:criterion|clue)\s*[a-z]\b[\s:.)-]*)|\Z)"
+    )
+    match = pattern.search(evidence_text or "")
+    return match.group(1).strip() if match else ""
+
+
+def _has_contradiction(text: str) -> bool:
+    lowered = f" {(text or '').lower()} "
+    return any(marker in lowered for marker in _CONTRADICTION_MARKERS)
+
+
+def _criterion_sections(evidence_text: str) -> list[tuple[str, str]]:
+    pattern = re.compile(
+        r"(?is)(?:^|\n)\s*(?:[*#\-\s]*)(?:criterion|clue)\s*([a-z])\b[\s:.)-]*(.*?)(?=(?:\n\s*(?:[*#\-\s]*)(?:criterion|clue)\s*[a-z]\b[\s:.)-]*)|\Z)"
+    )
+    return [(m.group(1).lower(), m.group(2).strip()) for m in pattern.finditer(evidence_text or "")]
+
+
+def _registrable_domain(url: str) -> str:
+    try:
+        host = urlparse(url).netloc.lower().split("@")[-1].split(":", 1)[0]
+    except Exception:
+        return ""
+    if host.startswith("www."):
+        host = host[4:]
+    parts = [p for p in host.split(".") if p]
+    if len(parts) >= 2:
+        return ".".join(parts[-2:])
+    return host
+
+
+def _criterion_source_domains(evidence_text: str) -> dict[str, set[str]]:
+    by_letter: dict[str, set[str]] = {}
+    for letter, section in _criterion_sections(evidence_text):
+        domains = {_registrable_domain(url) for url in _extract_urls(section)}
+        domains = {domain for domain in domains if domain}
+        if domains:
+            by_letter[letter] = domains
+    return by_letter
+
+
+def _mixed_source_domain_reason(evidence_text: str) -> str:
+    """Detect unsupported multi-clue drafts stitched from unrelated domains.
+
+    This is generic and only uses explicit Criterion/Clue sections with URLs.
+    It prevents treating a single entity as supported when different clues cite
+    unrelated institution domains without cross-verification.
+    """
+
+    by_letter = _criterion_source_domains(evidence_text)
+    if len(by_letter) < 2:
+        return ""
+    all_domains = sorted({domain for domains in by_letter.values() for domain in domains})
+    if len(all_domains) <= 1:
+        return ""
+    summary = ", ".join(
+        f"{letter}:{'/'.join(sorted(domains))}" for letter, domains in sorted(by_letter.items())
+    )
+    return f"mixed source domains across clue sections ({summary})"
+
+
+def _heuristic_requirement_coverage(
+    requirements: Any,
+    evidence_text: str,
+) -> list[dict[str, str]]:
+    """Conservative fallback when the LLM critic returns no JSON.
+
+    Aggregate token overlap can pass multi-clue answers just because a draft
+    repeats the clue wording. For tasks with several explicit requirements,
+    produce per-requirement weak/satisfied statuses so the controller keeps
+    researching instead of finalizing a plausible but unsupported entity. If a
+    local clue section explicitly contradicts the requirement, mark it
+    contradicted even when token overlap is high.
+    """
+
+    items = _required_items(requirements)
+    if not items:
+        return []
+    evidence_tokens = _content_tokens(evidence_text)
+    mixed_domain_reason = _mixed_source_domain_reason(evidence_text)
+    coverage: list[dict[str, str]] = []
+    for i, item in enumerate(items, 1):
+        rid = str(item.get("id") or f"requirement_{i}")
+        desc = str(item.get("description") or rid)
+        ev = str(item.get("evidence_required") or "")
+        req_tokens = _content_tokens(f"{desc} {ev}")
+        local_section = _criterion_section(evidence_text, rid)
+        if local_section and _has_contradiction(local_section):
+            status = "contradicted"
+            reason = "candidate section explicitly contradicts or lacks this clue"
+        elif local_section and _criterion_letter_from_id(rid) and not _extract_urls(local_section):
+            status = "weak"
+            reason = "candidate clue section has no source URL for this requirement"
+        elif mixed_domain_reason:
+            status = "weak"
+            reason = mixed_domain_reason
+        elif not req_tokens:
+            status = "weak"
+            reason = "no checkable requirement terms"
+        else:
+            ratio = len(req_tokens & evidence_tokens) / max(1, len(req_tokens))
+            if ratio >= 0.72:
+                status = "satisfied"
+                reason = f"heuristic term coverage {ratio:.2f}"
+            else:
+                status = "weak"
+                reason = f"heuristic term coverage {ratio:.2f}; direct evidence not established"
+        coverage.append({"requirement_id": rid, "status": status, "reason": reason})
+    return coverage
+
+
+def _queries_for_weak_requirements(
+    prompt: str,
+    requirements: Any,
+    coverage: list[Any],
+) -> list[str]:
+    required_by_id: dict[str, str] = {}
+    for i, item in enumerate(_required_items(requirements), 1):
+        rid = str(item.get("id") or f"requirement_{i}")
+        required_by_id[rid] = " ".join(
+            str(item.get(k) or "") for k in ("description", "evidence_required")
+        ).strip()
+    queries: list[str] = []
+    prompt_bits = " ".join((prompt or "").split())[:120]
+    for item in coverage:
+        if not isinstance(item, Mapping):
+            continue
+        status = str(item.get("status") or "").lower()
+        if status not in {"missing", "weak", "contradicted"}:
+            continue
+        rid = str(item.get("requirement_id") or item.get("id") or "")
+        desc = required_by_id.get(rid, rid)
+        if desc:
+            queries.append(f"{prompt_bits} {desc} official source primary evidence"[:300])
+    return queries[:5]
 
 
 def _requirement_gate(requirements: Any, coverage: list[Any]) -> tuple[bool, list[str]] | None:
@@ -188,6 +381,7 @@ class SufficiencyCheckTool:
         requirement_coverage: list[Any] = []
         next_queries: list[str] = []
         source_urls: list[str] = []
+        requirements = ctx.notes.get("requirements") if hasattr(ctx.notes, "get") else {}
         if isinstance(llm_result, dict):
             raw_coverage = llm_result.get("coverage") or []
             if isinstance(raw_coverage, list):
@@ -210,9 +404,11 @@ class SufficiencyCheckTool:
             if isinstance(raw_sources, list):
                 for item in raw_sources:
                     source_urls.extend(_extract_urls(str(item)))
+        elif len(_required_items(requirements)) >= 3:
+            requirement_coverage = _heuristic_requirement_coverage(requirements, evidence_text)
 
         requirement_gate = _requirement_gate(
-            ctx.notes.get("requirements") if hasattr(ctx.notes, "get") else {},
+            requirements,
             requirement_coverage,
         )
         if requirement_gate is not None:
@@ -225,6 +421,15 @@ class SufficiencyCheckTool:
                 sufficient = True
                 missing_points = []
                 source = f"{source}+requirements_gate"
+
+        if requirement_coverage and not isinstance(llm_result, dict):
+            next_queries.extend(
+                _queries_for_weak_requirements(
+                    ctx.request.prompt or "",
+                    requirements,
+                    requirement_coverage,
+                )
+            )
 
         next_queries = _dedupe(next_queries)[:8]
         source_urls = _dedupe(source_urls)[:8]

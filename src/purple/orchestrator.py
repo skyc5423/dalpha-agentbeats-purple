@@ -49,6 +49,7 @@ class Orchestrator:
         time_limit_s: float | None = 180.0,
         time_source: Callable[[], float] = time.monotonic,
         max_attempts_per_tool: int = 3,
+        step_callback: Callable[[Transcript, BudgetTracker], None] | None = None,
     ) -> None:
         self._llm = llm if llm is not None else llm_from_env()
         self._llm_configured = self._llm is not None
@@ -58,18 +59,19 @@ class Orchestrator:
 
             registry = default_tools(llm=self._llm)
         self._registry = registry
-        self._controller: Controller = controller or self._default_controller()
-        self._finalizer = finalizer or Finalizer(llm=self._llm)
-        self._policy = policy_gate or PolicyGate()
         self._max_steps = max_steps
         self._time_limit_s = time_limit_s
         self._time_source = time_source
         self._max_attempts_per_tool = max_attempts_per_tool
+        self._step_callback = step_callback
+        self._controller: Controller = controller or self._default_controller()
+        self._finalizer = finalizer or Finalizer(llm=self._llm)
+        self._policy = policy_gate or PolicyGate()
 
     def _default_controller(self) -> Controller:
         if self._llm is not None:
             return LLMController(self._llm)
-        return RuleBasedController(profiler=self._profiler)
+        return RuleBasedController(profiler=self._profiler, max_external_attempts=self._max_attempts_per_tool)
 
     async def solve(self, request: TaskRequest) -> TaskResult:
         budget = BudgetTracker(
@@ -101,6 +103,7 @@ class Orchestrator:
                 registry=self._registry,
                 budget=budget,
                 max_attempts_per_tool=self._max_attempts_per_tool,
+                step_callback=self._step_callback,
             )
             loop_outcome = await loop.run(request, transcript, scratch)
             for tag in loop_outcome.flags:
