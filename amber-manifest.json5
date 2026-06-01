@@ -1,11 +1,20 @@
 {
   manifest_version: "0.1.0",
 
-  // This smoke-test agent currently requires no deployer configuration.
-  // Add benchmark/model secrets here later when the agent starts making LLM calls.
   config_schema: {
     type: "object",
-    properties: {},
+    properties: {
+      agent_llm: { type: "string", default: "gpt-4o-mini" },
+      llm_model: { type: "string", default: "" },
+      openai_api_key: { type: "string", secret: true, default: "" },
+      gemini_api_key: { type: "string", secret: true, default: "" },
+      anthropic_api_key: { type: "string", secret: true, default: "" },
+      deepseek_api_key: { type: "string", secret: true, default: "" },
+      openrouter_api_key: { type: "string", secret: true, default: "" },
+      openai_base_url: { type: "string", default: "" },
+      llm_base_url: { type: "string", default: "" },
+      openai_web_search_model: { type: "string", default: "" },
+    },
     required: [],
     additionalProperties: false,
   },
@@ -19,7 +28,18 @@
   program: {
     image: "ghcr.io/skyc5423/dalpha-agentbeats-purple:latest",
     entrypoint: "uv run src/server.py --host 0.0.0.0 --port 9010",
-    env: {},
+    env: {
+      LLM_MODEL: "${config.llm_model}",
+      OPENAI_MODEL: "${config.agent_llm}",
+      OPENAI_API_KEY: "${config.openai_api_key}",
+      GEMINI_API_KEY: "${config.gemini_api_key}",
+      ANTHROPIC_API_KEY: "${config.anthropic_api_key}",
+      DEEPSEEK_API_KEY: "${config.deepseek_api_key}",
+      OPENROUTER_API_KEY: "${config.openrouter_api_key}",
+      OPENAI_BASE_URL: "${config.openai_base_url}",
+      LLM_BASE_URL: "${config.llm_base_url}",
+      OPENAI_WEB_SEARCH_MODEL: "${config.openai_web_search_model}",
+    },
 
     network: {
       endpoints: [
