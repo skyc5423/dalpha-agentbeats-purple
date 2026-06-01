@@ -9,6 +9,7 @@ that checklist instead of relying on an implicit plan.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Mapping
 
 from ..llm import ChatMessage, LLMClient
@@ -115,20 +116,91 @@ class AnalyzeRequirementsTool:
 
     @staticmethod
     def _fallback_requirements(task: str) -> dict[str, Any]:
-        return {
-            "task_type": "general_task",
-            "required_outputs": [
+        explicit_clauses = _extract_explicit_clauses(task)
+        required_outputs: list[dict[str, Any]] = [
+            {
+                "id": "answer",
+                "description": "Identify the final requested answer that satisfies all non-optional constraints",
+                "evidence_required": "Public evidence must support the answer and connect it to every required constraint",
+                "optional": False,
+            }
+        ]
+        for i, clause in enumerate(explicit_clauses, 1):
+            required_outputs.append(
                 {
-                    "id": "answer",
-                    "description": "Answer every explicit part of the user task",
-                    "evidence_required": "Use provided context or retrieved public evidence where the task asks for factual claims",
+                    "id": f"criterion_{i}",
+                    "description": clause[:500],
+                    "evidence_required": "Find independent public evidence for this criterion and preserve the source URL, date, and quoted support where available",
                     "optional": False,
                 }
+            )
+        minimum = "The final answer must address every explicit field, qualifier, and evidence/citation request in the task."
+        if explicit_clauses:
+            minimum = (
+                "The final answer must identify one candidate that satisfies all listed criteria; "
+                "each criterion must have source-backed support, and mixed-entity evidence must be rejected."
+            )
+        return {
+            "task_type": "multi_requirement_entity_lookup" if explicit_clauses else "general_task",
+            "required_outputs": required_outputs,
+            "minimum_success_condition": minimum,
+            "common_failure_modes": [
+                "Answering only part of the task",
+                "Ignoring requested evidence or scope qualifiers",
+                "Combining evidence from different entities as if it supports one answer",
             ],
-            "minimum_success_condition": "The final answer must address every explicit field, qualifier, and evidence/citation request in the task.",
-            "common_failure_modes": ["Answering only part of the task", "Ignoring requested evidence or scope qualifiers"],
-            "initial_search_hints": [task[:240]],
+            "initial_search_hints": _fallback_search_hints(task, explicit_clauses),
         }
+
+
+def _extract_explicit_clauses(task: str) -> list[str]:
+    """Extract visible user-listed constraints without using benchmark knowledge.
+
+    This is a generic fallback for no-LLM or failed-LLM analysis.  It handles
+    common clue/checklist phrasing such as ``A. ... B. ...`` or numbered lists,
+    so downstream verification sees each constraint separately instead of a
+    single vague "answer the task" requirement.
+    """
+
+    text = " ".join((task or "").split())
+    if not text:
+        return []
+
+    patterns = [
+        r"(?:^|\s)([A-H])\.\s+(.*?)(?=(?:\s+[A-H]\.\s+)|$)",
+        r"(?:^|\s)(\d{1,2})[\.)]\s+(.*?)(?=(?:\s+\d{1,2}[\.)]\s+)|$)",
+    ]
+    best: list[str] = []
+    for pattern in patterns:
+        matches = [m.group(2).strip(" ;:-") for m in re.finditer(pattern, text, flags=re.IGNORECASE)]
+        matches = [m for m in matches if len(m.split()) >= 4]
+        if len(matches) > len(best):
+            best = matches
+    if len(best) >= 2:
+        return best[:12]
+
+    # Fallback for prose that introduces several criteria separated by
+    # semicolons after words like "criteria" or "requirements".
+    if re.search(r"\b(criteria|requirements|constraints|conditions)\b", text, flags=re.IGNORECASE):
+        chunks = [c.strip(" ;:-") for c in re.split(r";\s+", text)]
+        chunks = [c for c in chunks if len(c.split()) >= 5]
+        if len(chunks) >= 2:
+            return chunks[:12]
+    return []
+
+
+def _fallback_search_hints(task: str, clauses: list[str]) -> list[str]:
+    if not clauses:
+        return [task[:240]] if task else []
+    hints: list[str] = []
+    for clause in clauses[:6]:
+        words = re.findall(r"[A-Za-z0-9][A-Za-z0-9'-]+", clause)
+        # Keep distinctive quoted/date/domain words but avoid carrying the full
+        # overlong multi-clue prompt into one search query.
+        compact = " ".join(words[:14])
+        if compact:
+            hints.append(compact[:180])
+    return hints or [task[:240]]
 
 
 def _normalise_requirements(data: Mapping[str, Any]) -> dict[str, Any]:

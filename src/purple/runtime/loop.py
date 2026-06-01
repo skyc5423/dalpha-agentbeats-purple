@@ -11,8 +11,9 @@ The loop owns:
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from ..budget import BudgetTracker
 from ..schema import TaskRequest
@@ -54,12 +55,14 @@ class ControllerLoop:
         budget: BudgetTracker,
         max_attempts_per_tool: int = 2,
         max_consecutive_duplicates: int = 2,
+        step_callback: Callable[[Transcript, BudgetTracker], None] | None = None,
     ) -> None:
         self._controller = controller
         self._registry = registry
         self._budget = budget
         self._max_attempts_per_tool = max_attempts_per_tool
         self._max_consecutive_duplicates = max_consecutive_duplicates
+        self._step_callback = step_callback
 
     async def run(
         self,
@@ -73,6 +76,7 @@ class ControllerLoop:
         surrender_reason = ""
         final_answer: str | None = None
         last_call_key: tuple | None = None
+        seen_external_call_keys: set[tuple] = set()
         consecutive_duplicates = 0
 
         tool_map = _registry_items(self._registry)
@@ -131,6 +135,37 @@ class ControllerLoop:
 
             call = action
             call_key = (call.name, _hashable_args(call.args))
+            if call.name in {"web_search", "web_fetch"} and call_key in seen_external_call_keys:
+                duplicate_outputs: dict[str, Any] = {}
+                if call.name == "web_search":
+                    query = call.args.get("query") if isinstance(call.args, Mapping) else None
+                    prior = call.args.get("attempted_queries") if isinstance(call.args, Mapping) else None
+                    attempted = [str(x) for x in prior] if isinstance(prior, (list, tuple)) else []
+                    if isinstance(query, str) and query.strip():
+                        duplicate_outputs["query"] = query.strip()
+                        duplicate_outputs["skipped_query"] = query.strip()
+                        if query.strip() not in attempted:
+                            attempted.append(query.strip())
+                    duplicate_outputs["attempted_queries"] = attempted
+                    duplicate_outputs["results"] = []
+                    duplicate_outputs["spans"] = []
+                elif call.name == "web_fetch":
+                    url = call.args.get("url") if isinstance(call.args, Mapping) else None
+                    if isinstance(url, str) and url.strip():
+                        duplicate_outputs["url"] = url.strip()
+                    duplicate_outputs["fetched"] = False
+                result = ToolResult(
+                    tool_call_id=call.id,
+                    ok=False,
+                    summary=f"duplicate {call.name} call skipped",
+                    observation=f"duplicate {call.name} call skipped",
+                    outputs=duplicate_outputs,
+                    error="duplicate-call",
+                )
+                transcript.append(call, result)
+                self._budget.record_step()
+                self._emit_step(transcript)
+                continue
             if call_key == last_call_key:
                 consecutive_duplicates += 1
                 if consecutive_duplicates >= self._max_consecutive_duplicates:
@@ -152,6 +187,7 @@ class ControllerLoop:
                 )
                 transcript.append(call, result)
                 self._budget.record_step()
+                self._emit_step(transcript)
                 continue
 
             attempts = sum(1 for name in transcript.names() if name == call.name)
@@ -166,6 +202,7 @@ class ControllerLoop:
                 )
                 transcript.append(call, result)
                 self._budget.record_step()
+                self._emit_step(transcript)
                 continue
 
             ctx = ToolContext(
@@ -186,8 +223,11 @@ class ControllerLoop:
                 )
             if not result.tool_call_id:
                 result = dataclasses.replace(result, tool_call_id=call.id)
+            if call.name in {"web_search", "web_fetch"}:
+                seen_external_call_keys.add(call_key)
             transcript.append(call, result)
             self._budget.record_step()
+            self._emit_step(transcript)
 
         if truncated:
             flags.append("budget-truncated")
@@ -199,6 +239,11 @@ class ControllerLoop:
             truncated=truncated,
             flags=tuple(flags),
         )
+
+    def _emit_step(self, transcript: Transcript) -> None:
+        if self._step_callback is None:
+            return
+        self._step_callback(transcript, self._budget)
 
 
 def _final_needs_more_evidence_check(transcript: Transcript) -> bool:

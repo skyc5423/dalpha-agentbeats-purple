@@ -104,6 +104,71 @@ def _answer_repeats_rejected_candidate(answer: str, candidate: str) -> bool:
     return len(cand_tokens) <= 5 and len(overlap) / max(1, len(cand_tokens)) >= 0.8
 
 
+def _has_multi_requirement_gate(requirements: Any) -> bool:
+    if not isinstance(requirements, dict):
+        return False
+    raw = requirements.get("required_outputs")
+    if not isinstance(raw, list):
+        return False
+    required_count = sum(1 for item in raw if isinstance(item, dict) and not bool(item.get("optional", False)))
+    return required_count >= 3
+
+
+def _is_insufficient_non_answer(text: str) -> bool:
+    lowered = " ".join((text or "").lower().split())
+    if not lowered:
+        return False
+    markers = (
+        "insufficient verified evidence",
+        "insufficient evidence",
+        "unable to identify",
+        "cannot identify",
+        "can't identify",
+        "no supported institution",
+        "no institution name is supported",
+        "does not support identifying",
+        "no verifier-ready institution",
+        "no verifier-ready answer",
+        "no supported answer",
+        "does not satisfy the criteria",
+        "not enough evidence",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _has_blocking_requirement_coverage(coverage: Any) -> bool:
+    if not isinstance(coverage, list):
+        return False
+    for item in coverage:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("status") or "").lower() in {"missing", "weak", "contradicted"}:
+            return True
+    return False
+
+
+def _looks_like_raw_evidence_fallback(text: str) -> bool:
+    """Detect non-answer snippets promoted from search/fetch artifacts.
+
+    A general multi-requirement entity task should not finish with a raw search
+    result title or fetched-source excerpt when the requirement coverage table is
+    still blocked. This is evidence-gate hygiene, not benchmark/task-id routing.
+    """
+
+    lowered = " ".join((text or "").lower().split())
+    if not lowered:
+        return False
+    raw_prefixes = (
+        "search result:",
+        "fetched source ",
+        "source excerpt:",
+        "web result:",
+    )
+    if lowered.startswith(raw_prefixes):
+        return True
+    return bool(re.match(r"^https?://\S+\s+", lowered))
+
+
 @dataclass(frozen=True)
 class FinalizationResult:
     answer: str
@@ -189,14 +254,18 @@ class Finalizer:
             if _is_structured_github_commit_metadata(candidate):
                 answer = candidate
             elif self._llm is not None and (candidate or spans):
-                answer = await self._llm_compose(
-                    request,
-                    candidate,
-                    spans,
-                    verification,
-                    transcript.latest_output("requirements") or {},
-                )
-                used_llm = bool(answer)
+                if verification["verdict"] == "unsupported" and _has_multi_requirement_gate(transcript.latest_output("requirements") or {}):
+                    answer = ""
+                    used_llm = False
+                else:
+                    answer = await self._llm_compose(
+                        request,
+                        candidate,
+                        spans,
+                        verification,
+                        transcript.latest_output("requirements") or {},
+                    )
+                    used_llm = bool(answer)
                 if verification["verdict"] == "unsupported" and _answer_repeats_rejected_candidate(answer, candidate):
                     answer = ""
                     used_llm = False
@@ -325,6 +394,41 @@ class Finalizer:
         confidence = heuristic_confidence
         source = "heuristic"
         concerns: list[str] = []
+        requirements = transcript.latest_output("requirements") or {}
+
+        if _has_multi_requirement_gate(requirements) and _is_insufficient_non_answer(candidate):
+            return {
+                "confidence": 0.05,
+                "verdict": "unsupported",
+                "concerns": ["candidate is an explicit insufficient-evidence non-answer for a multi-requirement task"],
+                "source": "heuristic_non_answer_guard",
+                "heuristic_confidence": heuristic_confidence,
+            }
+
+        coverage = transcript.latest_output("requirement_coverage")
+        multi_requirement_blocked = _has_multi_requirement_gate(requirements) and (
+            coverage is None or _has_blocking_requirement_coverage(coverage)
+        )
+        if multi_requirement_blocked and not candidate and spans:
+            return {
+                "confidence": 0.05,
+                "verdict": "unsupported",
+                "concerns": ["no answer candidate was produced for a multi-requirement task with incomplete evidence coverage"],
+                "source": "heuristic_requirement_gate",
+                "heuristic_confidence": heuristic_confidence,
+            }
+
+        if (
+            multi_requirement_blocked
+            and _looks_like_raw_evidence_fallback(candidate)
+        ):
+            return {
+                "confidence": min(0.05, heuristic_confidence),
+                "verdict": "unsupported",
+                "concerns": ["candidate is a raw search/fetch artifact without complete multi-requirement evidence coverage"],
+                "source": "heuristic_requirement_gate",
+                "heuristic_confidence": heuristic_confidence,
+            }
 
         if candidate and any(
             isinstance(s, str) and s.startswith("Calculation:") and candidate in s
@@ -342,6 +446,19 @@ class Finalizer:
                 verdict = llm_result["verdict"]
                 concerns = llm_result["concerns"]
                 source = "llm"
+
+        if multi_requirement_blocked and candidate:
+            blocking_concern = (
+                "multi-requirement coverage is incomplete or contradicted; "
+                "candidate cannot be promoted without a satisfied requirement table"
+            )
+            return {
+                "confidence": min(0.05, heuristic_confidence, confidence),
+                "verdict": "unsupported",
+                "concerns": [blocking_concern, *concerns[:4]],
+                "source": f"{source}+requirement_gate",
+                "heuristic_confidence": heuristic_confidence,
+            }
 
         return {
             "confidence": confidence,
