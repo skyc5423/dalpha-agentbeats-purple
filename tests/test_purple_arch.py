@@ -168,6 +168,32 @@ def test_budget_caps_time_limit() -> None:
     assert budget.can_continue() is False
 
 
+def test_orchestrator_reads_budget_from_env(monkeypatch) -> None:
+    monkeypatch.setenv("PURPLE_MAX_STEPS", "37")
+    monkeypatch.setenv("PURPLE_TIME_LIMIT_S", "123")
+    monkeypatch.setenv("PURPLE_MAX_ATTEMPTS_PER_TOOL", "5")
+    monkeypatch.setenv("PURPLE_TRACE_STEPS", "0")
+
+    orch = Orchestrator()
+
+    assert orch._max_steps == 37
+    assert orch._time_limit_s == 123.0
+    assert orch._max_attempts_per_tool == 5
+
+
+def test_orchestrator_defaults_to_expanded_submission_budget(monkeypatch) -> None:
+    monkeypatch.delenv("PURPLE_MAX_STEPS", raising=False)
+    monkeypatch.delenv("PURPLE_TIME_LIMIT_S", raising=False)
+    monkeypatch.delenv("PURPLE_MAX_ATTEMPTS_PER_TOOL", raising=False)
+    monkeypatch.setenv("PURPLE_TRACE_STEPS", "0")
+
+    orch = Orchestrator()
+
+    assert orch._max_steps == 40
+    assert orch._time_limit_s == 600.0
+    assert orch._max_attempts_per_tool == 6
+
+
 # ---------------------------------------------------------------------------
 # Profiler invariants
 # ---------------------------------------------------------------------------

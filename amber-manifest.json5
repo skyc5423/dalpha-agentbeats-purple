@@ -4,7 +4,7 @@
   config_schema: {
     type: "object",
     properties: {
-      agent_llm: { type: "string", default: "gpt-4o-mini" },
+      agent_llm: { type: "string", default: "gpt-5.5" },
       llm_model: { type: "string", default: "" },
       openai_api_key: { type: "string", secret: true, default: "" },
       gemini_api_key: { type: "string", secret: true, default: "" },
@@ -14,6 +14,12 @@
       openai_base_url: { type: "string", default: "" },
       llm_base_url: { type: "string", default: "" },
       openai_web_search_model: { type: "string", default: "" },
+      purple_max_steps: { type: "string", default: "40" },
+      purple_time_limit_s: { type: "string", default: "600" },
+      purple_max_attempts_per_tool: { type: "string", default: "6" },
+      purple_trace_steps: { type: "string", default: "1" },
+      purple_trace_results: { type: "string", default: "1" },
+      purple_enable_debug_artifact: { type: "string", default: "0" },
     },
     required: [],
     additionalProperties: false,
@@ -39,6 +45,12 @@
       OPENAI_BASE_URL: "${config.openai_base_url}",
       LLM_BASE_URL: "${config.llm_base_url}",
       OPENAI_WEB_SEARCH_MODEL: "${config.openai_web_search_model}",
+      PURPLE_MAX_STEPS: "${config.purple_max_steps}",
+      PURPLE_TIME_LIMIT_S: "${config.purple_time_limit_s}",
+      PURPLE_MAX_ATTEMPTS_PER_TOOL: "${config.purple_max_attempts_per_tool}",
+      PURPLE_TRACE_STEPS: "${config.purple_trace_steps}",
+      PURPLE_TRACE_RESULTS: "${config.purple_trace_results}",
+      PURPLE_ENABLE_DEBUG_ARTIFACT: "${config.purple_enable_debug_artifact}",
     },
 
     network: {
